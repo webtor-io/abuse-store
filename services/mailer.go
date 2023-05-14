@@ -2,17 +2,13 @@ package services
 
 import (
 	"bytes"
-	"context"
 	_ "embed"
 	"fmt"
-	"strings"
-	"text/template"
-	"time"
-
 	"github.com/pkg/errors"
 	log "github.com/sirupsen/logrus"
+	"strings"
+	"text/template"
 
-	"github.com/mailgun/mailgun-go/v3"
 	"github.com/urfave/cli"
 	m "github.com/webtor-io/abuse-store/models"
 
@@ -75,7 +71,7 @@ func RegisterMailerFlags(f []cli.Flag) []cli.Flag {
 type Mailer struct {
 	sender  string
 	support string
-	mg      *mailgun.MailgunImpl
+	smtp    *SMTP
 }
 
 type View struct {
@@ -83,11 +79,11 @@ type View struct {
 	Support string
 }
 
-func NewMailer(c *cli.Context, mg *mailgun.MailgunImpl) *Mailer {
+func NewMailer(c *cli.Context, smtp *SMTP) *Mailer {
 	return &Mailer{
 		sender:  c.String(mailSender),
 		support: c.String(mailSupport),
-		mg:      mg,
+		smtp:    smtp,
 	}
 }
 
@@ -110,17 +106,12 @@ func (s *Mailer) SendUserEmail(a *m.Abuse) error {
 		return err
 	}
 
-	message := s.mg.NewMessage(s.sender, fmt.Sprintf("Re: %s", a.Subject), body, a.Email)
-
-	ctx, cancel := context.WithTimeout(context.Background(), time.Second*10)
-	defer cancel()
-
-	resp, id, err := s.mg.Send(ctx, message)
+	err = s.smtp.Send(s.sender, a.Email, fmt.Sprintf("Re: %s", a.Subject), body)
 
 	if err != nil {
 		return errors.Wrap(err, "failed to send notification")
 	} else {
-		log.Infof("notification sent to=%v with response=%v and id=%v", a.Email, resp, id)
+		log.Infof("notification sent to=%v", a.Email)
 	}
 	return nil
 }
@@ -131,18 +122,12 @@ func (s *Mailer) SendSupportEmail(a *m.Abuse) error {
 		return err
 	}
 
-	message := s.mg.NewMessage(s.sender, fmt.Sprintf("[%s] %s", a.NoticeID, a.Subject), body, s.support)
-	message.AddHeader("Reply-To", a.Email)
-
-	ctx, cancel := context.WithTimeout(context.Background(), time.Second*10)
-	defer cancel()
-
-	resp, id, err := s.mg.Send(ctx, message)
+	err = s.smtp.Send(s.sender, s.support, fmt.Sprintf("[%s] %s", a.NoticeID, a.Subject), body)
 
 	if err != nil {
 		return errors.Wrap(err, "failed to send support notification")
 	} else {
-		log.Infof("support notification sent to=%v with response=%v and id=%v", s.support, resp, id)
+		log.Infof("support notification sent to=%v", s.support)
 	}
 	return nil
 }

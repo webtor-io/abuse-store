@@ -26,7 +26,7 @@ func configureServe(c *cli.Command) {
 	c.Flags = cs.RegisterPGFlags(c.Flags)
 	c.Flags = s.RegisterGRPCFlags(c.Flags)
 	c.Flags = s.RegisterStoreFlags(c.Flags)
-	c.Flags = s.RegisterMailgunFlags(c.Flags)
+	c.Flags = s.RegisterSMTPFlags(c.Flags)
 	c.Flags = s.RegisterMailerFlags(c.Flags)
 }
 
@@ -53,11 +53,11 @@ func serve(c *cli.Context) error {
 		return err
 	}
 
-	// Setting Mailgun
-	mg := s.NewMaigun(c)
+	// Setting SMTP
+	smtp := s.NewSMTP(c)
 
 	// Setting Mailer
-	mr := s.NewMailer(c, mg)
+	mr := s.NewMailer(c, smtp)
 
 	// Setting Probe
 	probe := cs.NewProbe(c)
