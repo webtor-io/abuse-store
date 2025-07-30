@@ -47,6 +47,9 @@ func NewStore(c *cli.Context, b *badger.DB, p *cs.PG) *Store {
 
 func (s *Store) Sync() error {
 	pg := s.p.Get()
+	if pg == nil {
+		return errors.New("database not initialized")
+	}
 	log.Info("DB syncing started")
 	err := pg.Model(&m.Abuse{}).ForEach(func(a *m.Abuse) error {
 		err := s.pushToCache(a)
