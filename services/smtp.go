@@ -9,11 +9,12 @@ import (
 )
 
 const (
-	smtpHostFlag = "smtp-host"
-	smtpPortFlag = "smtp-port"
-	smtpPassFlag = "smtp-pass"
-	smtpUserFlag = "smtp-user"
-	smtpTLSFlag  = "smtp-tls"
+	smtpHostFlag     = "smtp-host"
+	smtpPortFlag     = "smtp-port"
+	smtpPassFlag     = "smtp-pass"
+	smtpUserFlag     = "smtp-user"
+	smtpTLSFlag      = "smtp-tls"
+	smtpStartTLSFlag = "smtp-start-tls"
 )
 
 func RegisterSMTPFlags(f []cli.Flag) []cli.Flag {
@@ -43,15 +44,21 @@ func RegisterSMTPFlags(f []cli.Flag) []cli.Flag {
 			Usage:  "smtp tls",
 			EnvVar: "SMTP_TLS",
 		},
+		cli.BoolFlag{
+			Name:   smtpStartTLSFlag,
+			Usage:  "smtp starttls",
+			EnvVar: "SMTP_STARTTLS",
+		},
 	)
 }
 
 type SMTP struct {
-	host string
-	port int
-	user string
-	pass string
-	tls  bool
+	host     string
+	port     int
+	user     string
+	pass     string
+	tls      bool
+	startTLS bool
 }
 
 func (s *SMTP) Send(from string, to string, subj string, body string) error {
@@ -99,6 +106,18 @@ func (s *SMTP) Send(from string, to string, subj string, body string) error {
 		}
 	} else {
 		c, err = smtp.Dial(servername)
+		if err != nil {
+			return err
+		}
+		if s.startTLS {
+			tlsconfig := &tls.Config{
+				InsecureSkipVerify: true,
+				ServerName:         s.host,
+			}
+			if err = c.StartTLS(tlsconfig); err != nil {
+				return err
+			}
+		}
 	}
 
 	// Auth
@@ -138,10 +157,11 @@ func (s *SMTP) Send(from string, to string, subj string, body string) error {
 
 func NewSMTP(c *cli.Context) *SMTP {
 	return &SMTP{
-		host: c.String(smtpHostFlag),
-		port: c.Int(smtpPortFlag),
-		user: c.String(smtpUserFlag),
-		pass: c.String(smtpPassFlag),
-		tls:  c.Bool(smtpTLSFlag),
+		host:     c.String(smtpHostFlag),
+		port:     c.Int(smtpPortFlag),
+		user:     c.String(smtpUserFlag),
+		pass:     c.String(smtpPassFlag),
+		tls:      c.Bool(smtpTLSFlag),
+		startTLS: c.Bool(smtpStartTLSFlag),
 	}
 }
