@@ -55,7 +55,7 @@ func RegisterSMTPFlags(f []cli.Flag) []cli.Flag {
 			Usage:  "smtp starttls",
 			EnvVar: "SMTP_STARTTLS",
 		},
-		cli.BoolFlag{
+		cli.BoolTFlag{
 			Name:   smtpTLSSecureFlag,
 			Usage:  "smtp tls secure",
 			EnvVar: "SMTP_TLS_SECURE",
@@ -103,7 +103,7 @@ func (s *SMTP) Send(from string, to string, replyTo string, subj string, body st
 	if s.tls {
 		// TLS config
 		tlsConfig := &tls.Config{
-			InsecureSkipVerify: s.tlsSecure,
+			InsecureSkipVerify: !s.tlsSecure,
 			ServerName:         s.host,
 		}
 
@@ -126,7 +126,7 @@ func (s *SMTP) Send(from string, to string, replyTo string, subj string, body st
 		}
 		if s.startTLS {
 			tlsConfig := &tls.Config{
-				InsecureSkipVerify: s.tlsSecure,
+				InsecureSkipVerify: !s.tlsSecure,
 				ServerName:         s.host,
 			}
 			if err = c.StartTLS(tlsConfig); err != nil {
