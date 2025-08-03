@@ -50,11 +50,6 @@ func RegisterSMTPFlags(f []cli.Flag) []cli.Flag {
 			Usage:  "smtp starttls",
 			EnvVar: "SMTP_STARTTLS",
 		},
-		cli.BoolFlag{
-			Name:   smtpStartTLSFlag,
-			Usage:  "smtp starttls",
-			EnvVar: "SMTP_STARTTLS",
-		},
 		cli.BoolTFlag{
 			Name:   smtpTLSSecureFlag,
 			Usage:  "smtp tls secure",
