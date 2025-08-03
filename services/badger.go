@@ -4,11 +4,9 @@ import (
 	"time"
 
 	"github.com/dgraph-io/badger/v3"
-
-	"github.com/urfave/cli"
 )
 
-func NewBadger(c *cli.Context) *badger.DB {
+func NewBadger() *badger.DB {
 	opt := badger.DefaultOptions("/tmp/badger")
 	db, _ := badger.Open(opt)
 	go func() {

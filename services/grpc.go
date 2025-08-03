@@ -146,9 +146,9 @@ func (s *GRPC) Push(ctx context.Context, in *pb.PushRequest) (*pb.PushReply, err
 	return &pb.PushReply{}, nil
 }
 
-func (s *GRPC) Check(ctx context.Context, in *pb.CheckRequest) (*pb.CheckReply, error) {
+func (s *GRPC) Check(_ context.Context, in *pb.CheckRequest) (*pb.CheckReply, error) {
 	err := s.store.Check(in.GetInfohash())
-	if err == ErrNotFound {
+	if errors.Is(err, ErrNotFound) {
 		return &pb.CheckReply{Exists: false}, nil
 	} else if err != nil {
 		return nil, errors.Wrap(err, "failed to get data")
@@ -163,6 +163,6 @@ func (s *GRPC) Close() {
 		log.Info("GRPC closed")
 	}()
 	if s.ln != nil {
-		s.ln.Close()
+		_ = s.ln.Close()
 	}
 }

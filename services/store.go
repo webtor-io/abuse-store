@@ -68,7 +68,7 @@ func (s *Store) Sync() error {
 func (s *Store) Check(i string) error {
 	return s.b.Update(func(txn *badger.Txn) error {
 		_, err := txn.Get([]byte(i))
-		if err == badger.ErrKeyNotFound {
+		if errors.Is(err, badger.ErrKeyNotFound) {
 			return ErrNotFound
 		} else {
 			return err

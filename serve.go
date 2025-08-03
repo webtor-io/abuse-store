@@ -1,6 +1,7 @@
 package main
 
 import (
+	"github.com/dgraph-io/badger/v3"
 	log "github.com/sirupsen/logrus"
 	"github.com/urfave/cli"
 
@@ -43,8 +44,10 @@ func serve(c *cli.Context) error {
 	}
 
 	// Setting Badger
-	b := s.NewBadger(c)
-	defer b.Close()
+	b := s.NewBadger()
+	defer func(b *badger.DB) {
+		_ = b.Close()
+	}(b)
 
 	// Setting Store
 	st := s.NewStore(c, b, pg)

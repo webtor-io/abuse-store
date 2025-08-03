@@ -9,12 +9,13 @@ import (
 )
 
 const (
-	smtpHostFlag     = "smtp-host"
-	smtpPortFlag     = "smtp-port"
-	smtpPassFlag     = "smtp-pass"
-	smtpUserFlag     = "smtp-user"
-	smtpTLSFlag      = "smtp-tls"
-	smtpStartTLSFlag = "smtp-start-tls"
+	smtpHostFlag      = "smtp-host"
+	smtpPortFlag      = "smtp-port"
+	smtpPassFlag      = "smtp-pass"
+	smtpUserFlag      = "smtp-user"
+	smtpTLSFlag       = "smtp-tls"
+	smtpStartTLSFlag  = "smtp-start-tls"
+	smtpTLSSecureFlag = "smtp-tls-secure"
 )
 
 func RegisterSMTPFlags(f []cli.Flag) []cli.Flag {
@@ -49,26 +50,40 @@ func RegisterSMTPFlags(f []cli.Flag) []cli.Flag {
 			Usage:  "smtp starttls",
 			EnvVar: "SMTP_STARTTLS",
 		},
+		cli.BoolFlag{
+			Name:   smtpStartTLSFlag,
+			Usage:  "smtp starttls",
+			EnvVar: "SMTP_STARTTLS",
+		},
+		cli.BoolFlag{
+			Name:   smtpTLSSecureFlag,
+			Usage:  "smtp tls secure",
+			EnvVar: "SMTP_TLS_SECURE",
+		},
 	)
 }
 
 type SMTP struct {
-	host     string
-	port     int
-	user     string
-	pass     string
-	tls      bool
-	startTLS bool
+	host      string
+	port      int
+	user      string
+	pass      string
+	tls       bool
+	startTLS  bool
+	tlsSecure bool
 }
 
-func (s *SMTP) Send(from string, to string, subj string, body string) error {
-	fromAddr := mail.Address{"", from}
-	toAddr := mail.Address{"", to}
+func (s *SMTP) Send(from string, to string, replyTo string, subj string, body string) error {
+	fromAddr := mail.Address{Address: from}
+	toAddr := mail.Address{Address: to}
 
 	// Setup headers
 	headers := make(map[string]string)
 	headers["From"] = fromAddr.String()
 	headers["To"] = toAddr.String()
+	if replyTo != "" {
+		headers["Reply-To"] = replyTo
+	}
 	headers["Subject"] = subj
 
 	// Setup message
@@ -87,15 +102,15 @@ func (s *SMTP) Send(from string, to string, subj string, body string) error {
 
 	if s.tls {
 		// TLS config
-		tlsconfig := &tls.Config{
-			InsecureSkipVerify: true,
+		tlsConfig := &tls.Config{
+			InsecureSkipVerify: s.tlsSecure,
 			ServerName:         s.host,
 		}
 
 		// Here is the key, you need to call tls.Dial instead of smtp.Dial
 		// for smtp servers running on 465 that require an ssl connection
 		// from the very beginning (no starttls)
-		conn, err := tls.Dial("tcp", servername, tlsconfig)
+		conn, err := tls.Dial("tcp", servername, tlsConfig)
 		if err != nil {
 			return err
 		}
@@ -110,14 +125,17 @@ func (s *SMTP) Send(from string, to string, subj string, body string) error {
 			return err
 		}
 		if s.startTLS {
-			tlsconfig := &tls.Config{
-				InsecureSkipVerify: true,
+			tlsConfig := &tls.Config{
+				InsecureSkipVerify: s.tlsSecure,
 				ServerName:         s.host,
 			}
-			if err = c.StartTLS(tlsconfig); err != nil {
+			if err = c.StartTLS(tlsConfig); err != nil {
 				return err
 			}
 		}
+	}
+	if c == nil {
+		return fmt.Errorf("smtp: failed to connect")
 	}
 
 	// Auth
@@ -150,18 +168,17 @@ func (s *SMTP) Send(from string, to string, subj string, body string) error {
 		return err
 	}
 
-	c.Quit()
-
-	return nil
+	return c.Quit()
 }
 
 func NewSMTP(c *cli.Context) *SMTP {
 	return &SMTP{
-		host:     c.String(smtpHostFlag),
-		port:     c.Int(smtpPortFlag),
-		user:     c.String(smtpUserFlag),
-		pass:     c.String(smtpPassFlag),
-		tls:      c.Bool(smtpTLSFlag),
-		startTLS: c.Bool(smtpStartTLSFlag),
+		host:      c.String(smtpHostFlag),
+		port:      c.Int(smtpPortFlag),
+		user:      c.String(smtpUserFlag),
+		pass:      c.String(smtpPassFlag),
+		tls:       c.Bool(smtpTLSFlag),
+		startTLS:  c.Bool(smtpStartTLSFlag),
+		tlsSecure: c.Bool(smtpTLSSecureFlag),
 	}
 }
