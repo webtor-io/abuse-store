@@ -25,6 +25,7 @@ func configureServe(c *cli.Command) {
 
 	c.Flags = cs.RegisterProbeFlags(c.Flags)
 	c.Flags = cs.RegisterPGFlags(c.Flags)
+	c.Flags = cs.RegisterNATSFlags(c.Flags)
 	c.Flags = s.RegisterGRPCFlags(c.Flags)
 	c.Flags = s.RegisterStoreFlags(c.Flags)
 	c.Flags = s.RegisterSMTPFlags(c.Flags)
@@ -62,12 +63,18 @@ func serve(c *cli.Context) error {
 	// Setting Mailer
 	mr := s.NewMailer(c, smtp)
 
+	// Setting NATS
+	nats := cs.NewNATS(c)
+	if nats != nil {
+		defer nats.Close()
+	}
+
 	// Setting Probe
 	probe := cs.NewProbe(c)
 	defer probe.Close()
 
 	// Setting GRPC
-	grpc := s.NewGRPC(c, st, mr)
+	grpc := s.NewGRPC(c, st, mr, nats)
 	defer grpc.Close()
 
 	// Setting Serve
