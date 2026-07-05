@@ -69,7 +69,7 @@ type SMTP struct {
 }
 
 func (s *SMTP) Send(from string, to string, replyTo string, subj string, body string) error {
-	fromAddr := mail.Address{Address: from}
+	fromAddr := mail.Address{Name: "Webtor", Address: from}
 	toAddr := mail.Address{Address: to}
 
 	// Setup headers
