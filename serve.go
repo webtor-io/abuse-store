@@ -45,7 +45,13 @@ func serve(c *cli.Context) error {
 	}
 
 	// Setting Badger
-	b := s.NewBadger()
+	b, err := s.NewBadger()
+	if err != nil {
+		return err
+	}
+	// Closed last, after the gRPC server has drained: handlers read this DB,
+	// and closing it underneath one is what turns a rollout into a nil
+	// dereference inside Badger.
 	defer func(b *badger.DB) {
 		_ = b.Close()
 	}(b)

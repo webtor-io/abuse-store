@@ -7,6 +7,7 @@ import (
 	"net"
 	"regexp"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/pkg/errors"
@@ -59,6 +60,12 @@ func RegisterGRPCFlags(f []cli.Flag) []cli.Flag {
 	)
 }
 
+// gracefulStopTimeout bounds how long shutdown waits for in-flight RPCs.
+// Check answers from a local KV and Push is dominated by one insert, so the
+// real tail is far below this; the pod's terminationGracePeriodSeconds is 30,
+// leaving room for Badger to close afterwards.
+const gracefulStopTimeout = 15 * time.Second
+
 type GRPC struct {
 	pb.UnimplementedAbuseStoreServer
 	host   string
@@ -67,6 +74,8 @@ type GRPC struct {
 	store  *Store
 	mailer *Mailer
 	nats   *cs.NATS
+	mu     sync.Mutex
+	gs     *grpc.Server
 }
 
 func NewGRPC(c *cli.Context, s *Store, mr *Mailer, nats *cs.NATS) *GRPC {
@@ -89,6 +98,11 @@ func (s *GRPC) Serve() error {
 	var opts []grpc.ServerOption
 	gs := grpc.NewServer(opts...)
 	pb.RegisterAbuseStoreServer(gs, s)
+
+	s.mu.Lock()
+	s.gs = gs
+	s.mu.Unlock()
+
 	log.Infof("serving GRPC at %v", addr)
 	return gs.Serve(ln)
 }
@@ -181,7 +195,10 @@ func (s *GRPC) Push(ctx context.Context, in *pb.PushRequest) (*pb.PushReply, err
 }
 
 func (s *GRPC) Check(_ context.Context, in *pb.CheckRequest) (*pb.CheckReply, error) {
-	err := s.store.Check(in.GetInfohash(), in.GetFingerprint())
+	// Infohashes are normalized on the way in, so normalize on the way out
+	// too: a caller sending an upper-case hash must get the same answer as one
+	// sending it lower-case, not a silent miss.
+	err := s.store.Check(normalizeInfohash(in.GetInfohash()), in.GetFingerprint())
 	if errors.Is(err, ErrNotFound) {
 		return &pb.CheckReply{Exists: false}, nil
 	} else if err != nil {
@@ -217,12 +234,45 @@ func (s *GRPC) publishBanned(infohash string) {
 	log.WithField("infohash", infohash).Info("published resource.banned")
 }
 
+// Close drains in-flight RPCs before returning.
+//
+// Closing only the listener — which is what this used to do — stops new
+// connections but leaves established ones serving, and shutdown then continued
+// down the defer chain and closed Badger underneath handlers still reading it.
+// That is the exact shape that crashed torrent-store three times during
+// rollouts in August 2026 (nil dereference inside Badger's memtable handling).
+// Badger closes after this returns, so it must be able to assume no handler is
+// still using it.
 func (s *GRPC) Close() {
 	log.Info("closing GRPC")
 	defer func() {
 		log.Info("GRPC closed")
 	}()
-	if s.ln != nil {
-		_ = s.ln.Close()
+
+	s.mu.Lock()
+	gs := s.gs
+	s.mu.Unlock()
+
+	if gs == nil {
+		// Never got as far as serving.
+		if s.ln != nil {
+			_ = s.ln.Close()
+		}
+		return
+	}
+
+	done := make(chan struct{})
+	go func() {
+		gs.GracefulStop()
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(gracefulStopTimeout):
+		// A stuck stream must not hold shutdown past the pod's grace period —
+		// losing it beats being SIGKILLed mid-close.
+		log.Warn("grpc graceful stop timed out, forcing")
+		gs.Stop()
+		<-done
 	}
 }
