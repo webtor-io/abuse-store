@@ -126,6 +126,10 @@ func main() {
 			Usage:   "pulls torrent from the store",
 			Flags: []cli.Flag{
 				cli.StringFlag{
+					Name:  "fingerprint, fp",
+					Usage: "hex content fingerprint; blocks if this payload is banned under any infohash",
+				},
+				cli.StringFlag{
 					Name:  "infohash, hash, ha",
 					Usage: "info hash of the torrent file",
 				},
@@ -141,8 +145,17 @@ func main() {
 
 				ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
 				defer cancel()
+				var checkFP []byte
+				if h := strings.TrimSpace(c.String("fingerprint")); h != "" {
+					d, derr := hex.DecodeString(h)
+					if derr != nil || len(d) != sha256.Size {
+						return fmt.Errorf("fingerprint %q must be %d hex-encoded bytes", h, sha256.Size)
+					}
+					checkFP = d
+				}
 				r, err := cl.Check(ctx, &pb.CheckRequest{
-					Infohash: c.String("infohash"),
+					Infohash:    c.String("infohash"),
+					Fingerprint: checkFP,
 				})
 				if err != nil {
 					return err
