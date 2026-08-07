@@ -1,21 +1,24 @@
--- Content fingerprints of blocked material.
+-- Content fingerprint of the blocked payload.
 --
--- An infohash covers the whole torrent info dict, so republishing the same
--- payload under a different name yields a different infohash and escapes a
--- per-infohash block. A fingerprint identifies the payload itself, so one
--- decision covers every copy, including ones uploaded later.
+-- An infohash covers the whole torrent info dict, so republishing one payload
+-- under a different name yields a different infohash and walks past a
+-- per-infohash block. The fingerprint identifies the payload itself, so one
+-- decision covers every copy including ones uploaded later.
 --
--- Always tied to an abuse row: a block must be traceable to the record that
--- caused it, otherwise a fingerprint-driven block is invisible to an audit.
-CREATE TABLE abuse_fingerprint (
-	abuse_id uuid  NOT NULL REFERENCES abuse (abuse_id) ON DELETE CASCADE,
-	-- Raw SHA-256, not hex: half the bytes and the length check below makes a
-	-- malformed value impossible to store.
-	value    bytea NOT NULL,
-	CONSTRAINT abuse_fingerprint_pk PRIMARY KEY (abuse_id, value),
-	CONSTRAINT abuse_fingerprint_value_len CHECK (length(value) = 32)
-);
+-- A column on abuse rather than a side table: exactly one fingerprint exists
+-- per torrent, so a separate row per abuse would buy nothing and cost a join.
+-- Living on the abuse row also makes the audit link automatic — a block is
+-- always traceable to the record that caused it.
+--
+-- Nullable: most rows are DMCA notices and questions, where a payload
+-- fingerprint is meaningless, and older rows predate this column.
+ALTER TABLE abuse ADD COLUMN fingerprint bytea;
 
--- Lookup is always "is this payload blocked", never "which payloads does this
--- record cover", so the index leads with value.
-CREATE INDEX abuse_fingerprint_value_idx ON abuse_fingerprint (value);
+-- Raw SHA-256, not hex: half the bytes, and the length check makes a
+-- malformed digest impossible to store.
+ALTER TABLE abuse ADD CONSTRAINT abuse_fingerprint_len
+	CHECK (fingerprint IS NULL OR length(fingerprint) = 32);
+
+-- Lookup is always "is this payload blocked", so only the rows that carry one
+-- are worth indexing.
+CREATE INDEX abuse_fingerprint_idx ON abuse (fingerprint) WHERE fingerprint IS NOT NULL;

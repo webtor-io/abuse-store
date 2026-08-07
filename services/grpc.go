@@ -117,6 +117,7 @@ func (s *GRPC) Push(ctx context.Context, in *pb.PushRequest) (*pb.PushReply, err
 		Description: in.GetDescription(),
 		Email:       email,
 		Subject:     subject,
+		Fingerprint: in.GetFingerprint(),
 		Cause:       int(in.GetCause()),
 		Source:      int(in.GetSource()),
 	}
@@ -130,7 +131,7 @@ func (s *GRPC) Push(ctx context.Context, in *pb.PushRequest) (*pb.PushReply, err
 			return nil, err
 		}
 		if !r.Exists {
-			err = s.store.Push(a, in.GetFingerprints())
+			err = s.store.Push(a)
 			if err != nil {
 				return nil, err
 			}
@@ -161,7 +162,7 @@ func (s *GRPC) Push(ctx context.Context, in *pb.PushRequest) (*pb.PushReply, err
 }
 
 func (s *GRPC) Check(_ context.Context, in *pb.CheckRequest) (*pb.CheckReply, error) {
-	err := s.store.Check(in.GetInfohash(), in.GetFingerprints())
+	err := s.store.Check(in.GetInfohash(), in.GetFingerprint())
 	if errors.Is(err, ErrNotFound) {
 		return &pb.CheckReply{Exists: false}, nil
 	} else if err != nil {

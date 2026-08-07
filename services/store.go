@@ -66,12 +66,6 @@ func (s *Store) Sync() error {
 	if err != nil {
 		return err
 	}
-	err = pg.Model(&m.AbuseFingerprint{}).ForEach(func(f *m.AbuseFingerprint) error {
-		return s.pushFingerprintToCache(f.Value)
-	})
-	if err != nil {
-		return err
-	}
 	log.Info("DB syncing finished")
 	return nil
 }
@@ -86,7 +80,7 @@ func fingerprintKey(v []byte) []byte {
 // fingerprint of its payload. The fingerprint arm is what catches the same
 // bytes republished under a new name — a new infohash the caller has never
 // been told about.
-func (s *Store) Check(i string, fingerprints [][]byte) error {
+func (s *Store) Check(i string, fingerprint []byte) error {
 	return s.b.View(func(txn *badger.Txn) error {
 		if i != "" {
 			if _, err := txn.Get([]byte(i)); err == nil {
@@ -95,11 +89,8 @@ func (s *Store) Check(i string, fingerprints [][]byte) error {
 				return err
 			}
 		}
-		for _, fp := range fingerprints {
-			if len(fp) != fingerprintSize {
-				continue
-			}
-			if _, err := txn.Get(fingerprintKey(fp)); err == nil {
+		if len(fingerprint) == fingerprintSize {
+			if _, err := txn.Get(fingerprintKey(fingerprint)); err == nil {
 				return nil
 			} else if !errors.Is(err, badger.ErrKeyNotFound) {
 				return err
@@ -109,28 +100,17 @@ func (s *Store) Check(i string, fingerprints [][]byte) error {
 	})
 }
 
-func (s *Store) Push(a *m.Abuse, fingerprints [][]byte) error {
+func (s *Store) Push(a *m.Abuse) error {
+	if len(a.Fingerprint) != 0 && len(a.Fingerprint) != fingerprintSize {
+		// Refuse rather than store: a malformed digest would sit in the index
+		// matching nothing while looking like coverage.
+		log.WithField("infohash", a.Infohash).WithField("len", len(a.Fingerprint)).Warn("dropping fingerprint of wrong length")
+		a.Fingerprint = nil
+	}
 	pg := s.p.Get()
 	_, err := pg.Model(a).Insert()
 	if err != nil {
 		return errors.Wrapf(err, "failed to push to db abuse=%+v", a)
-	}
-	for _, fp := range fingerprints {
-		if len(fp) != fingerprintSize {
-			log.WithField("infohash", a.Infohash).WithField("len", len(fp)).Warn("skipping fingerprint of wrong length")
-			continue
-		}
-		f := &m.AbuseFingerprint{AbuseID: a.ID, Value: fp}
-		if _, ferr := pg.Model(f).OnConflict("DO NOTHING").Insert(); ferr != nil {
-			// Non-fatal: the abuse row is the legally meaningful record and it
-			// is already stored. A missing fingerprint costs coverage of
-			// re-uploads, not the block itself.
-			log.WithField("infohash", a.Infohash).WithError(ferr).Warn("failed to store fingerprint")
-			continue
-		}
-		if cerr := s.pushFingerprintToCache(fp); cerr != nil {
-			log.WithField("infohash", a.Infohash).WithError(cerr).Warn("failed to cache fingerprint")
-		}
 	}
 	err = s.pushToCache(a)
 	if err != nil {
@@ -158,10 +138,16 @@ func (s *Store) pushToCache(a *m.Abuse) error {
 	if err != nil {
 		return errors.Wrapf(err, "failed to marshal data abuse=%v", a)
 	}
-	return s.b.Update(func(txn *badger.Txn) error {
+	if err = s.b.Update(func(txn *badger.Txn) error {
 		e := badger.NewEntry([]byte(a.Infohash), aa)
 		return txn.SetEntry(e)
-	})
+	}); err != nil {
+		return err
+	}
+	if len(a.Fingerprint) == fingerprintSize {
+		return s.pushFingerprintToCache(a.Fingerprint)
+	}
+	return nil
 }
 
 func (s *Store) Serve() error {

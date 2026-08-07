@@ -62,9 +62,9 @@ func main() {
 					Name:  "description, desc, d",
 					Usage: "Description of DMCA abuse (empty by default)",
 				},
-				cli.StringSliceFlag{
+				cli.StringFlag{
 					Name:  "fingerprint, fp",
-					Usage: "hex content fingerprint of the payload (repeatable); ask torrent-store for it. Without one the ban covers only this infohash, not re-uploads under other names",
+					Usage: "hex content fingerprint of the payload; ask torrent-store for it. Without it the ban covers only this infohash, not re-uploads under other names",
 				},
 				cli.StringFlag{
 					Name:  "notice-id, id",
@@ -90,27 +90,27 @@ func main() {
 
 				ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
 				defer cancel()
-				var fps [][]byte
-				for _, h := range c.StringSlice("fingerprint") {
-					d, derr := hex.DecodeString(strings.TrimSpace(h))
+				var fp []byte
+				if h := strings.TrimSpace(c.String("fingerprint")); h != "" {
+					d, derr := hex.DecodeString(h)
 					if derr != nil {
 						return fmt.Errorf("fingerprint %q is not hex: %w", h, derr)
 					}
 					if len(d) != sha256.Size {
 						return fmt.Errorf("fingerprint %q is %d bytes, want %d", h, len(d), sha256.Size)
 					}
-					fps = append(fps, d)
+					fp = d
 				}
 				_, err = cl.Push(ctx, &pb.PushRequest{
-					Fingerprints: fps,
-					Work:         c.String("work"),
-					Filename:     c.String("filename"),
-					Infohash:     c.String("infohash"),
-					Email:        c.String("email"),
-					Description:  c.String("description"),
-					NoticeId:     c.String("notice-id"),
-					Source:       pb.PushRequest_FORM,
-					Cause:        pb.PushRequest_ILLEGAL_CONTENT,
+					Fingerprint: fp,
+					Work:        c.String("work"),
+					Filename:    c.String("filename"),
+					Infohash:    c.String("infohash"),
+					Email:       c.String("email"),
+					Description: c.String("description"),
+					NoticeId:    c.String("notice-id"),
+					Source:      pb.PushRequest_FORM,
+					Cause:       pb.PushRequest_ILLEGAL_CONTENT,
 				})
 				if err != nil {
 					return err

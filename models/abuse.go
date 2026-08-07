@@ -19,5 +19,9 @@ type Abuse struct {
 	Cause       int       `pg:"cause"`
 	Source      int       `pg:"source"`
 	StartedAt   time.Time `pg:"started_at"`
+	// Fingerprint is the raw SHA-256 identifying the blocked payload, or nil
+	// when the report is not about one (DMCA notices, questions) or predates
+	// the column.
+	Fingerprint []byte    `pg:"fingerprint"`
 	CreatedAt   time.Time `pg:",default:now()"`
 }

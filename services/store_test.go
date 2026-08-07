@@ -28,9 +28,9 @@ func digest(b byte) []byte {
 	return d
 }
 
-func blocked(t *testing.T, s *Store, hash string, fps ...[]byte) bool {
+func blocked(t *testing.T, s *Store, hash string, fp []byte) bool {
 	t.Helper()
-	err := s.Check(hash, fps)
+	err := s.Check(hash, fp)
 	if err == nil {
 		return true
 	}
@@ -46,10 +46,10 @@ func TestCheckMatchesInfohash(t *testing.T) {
 	if err := s.pushToCacheRaw("abc123", []byte("{}")); err != nil {
 		t.Fatal(err)
 	}
-	if !blocked(t, s, "abc123") {
+	if !blocked(t, s, "abc123", nil) {
 		t.Fatal("known infohash not blocked")
 	}
-	if blocked(t, s, "other") {
+	if blocked(t, s, "other", nil) {
 		t.Fatal("unknown infohash blocked")
 	}
 }
@@ -68,20 +68,8 @@ func TestCheckMatchesFingerprintForUnknownInfohash(t *testing.T) {
 	if blocked(t, s, "never-reported-hash", digest(0xCD)) {
 		t.Fatal("unrelated payload blocked")
 	}
-	if blocked(t, s, "never-reported-hash") {
-		t.Fatal("blocked with no fingerprints supplied")
-	}
-}
-
-// Any one match blocks; the caller passes every fingerprint it derived.
-func TestCheckMatchesAnyOfSeveral(t *testing.T) {
-	s := newTestStore(t)
-	fp := digest(0x11)
-	if err := s.pushFingerprintToCache(fp); err != nil {
-		t.Fatal(err)
-	}
-	if !blocked(t, s, "h", digest(0x22), fp, digest(0x33)) {
-		t.Fatal("match in a later position missed")
+	if blocked(t, s, "never-reported-hash", nil) {
+		t.Fatal("blocked with no fingerprint supplied")
 	}
 }
 
@@ -113,7 +101,7 @@ func TestFingerprintKeyIsNamespaced(t *testing.T) {
 		t.Fatal(err)
 	}
 	// Same bytes read as an infohash must not hit the fingerprint entry.
-	if blocked(t, s, string(fp)) {
+	if blocked(t, s, string(fp), nil) {
 		t.Fatal("fingerprint entry was reachable through the infohash key space")
 	}
 }
