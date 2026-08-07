@@ -18,12 +18,15 @@ Only `Cause = ILLEGAL_CONTENT` notices are persisted in the stoplist or fan out 
 go build ./...                 # binary `abuse-store` (server) + `client/` CLI
 go vet ./...
 go run . serve [flags...]      # run the server locally
-go run . migrate up            # run PG migrations (uses common-services migration CMD)
 go run ./client push --hash ... --work ... --email ...   # smoke-test the gRPC API
 make protoc                    # regenerate proto/abuse-store.pb.go + _grpc.pb.go
 ```
 
-There are no tests in this repo.
+Migrations are **not** a separate command — `serve` runs `cs.NewPGMigration(pg).Run()` at startup, so a new file under `migrations/` applies itself on the next deploy. A migration that fails takes the pod down with it, so dry-run new ones against the target database in a rolled-back transaction first.
+
+⚠️ Migration 1 ends with `ALTER TABLE abuse OWNER TO abusestore;`, and **that role does not exist on the current database** — it last ran in 2022 on the old self-hosted cluster, and the table is owned by the connecting user now. Do not copy that line into a new migration; it would fail at pod start.
+
+Tests cover the `Check` blocking decision (`services/store_test.go`), which runs against an in-memory Badger and needs no Postgres. The rest of the service is untested.
 
 The `Dockerfile` produces a static linux binary, copies `migrations/` into `/migrations`, and exposes `8081` (probes) + `50051` (gRPC). HTTP serving is *not* exposed (the service has no HTTP handlers).
 
