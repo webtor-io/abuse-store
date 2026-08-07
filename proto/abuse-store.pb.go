@@ -158,17 +158,22 @@ func (*PushReply) Descriptor() ([]byte, []int) {
 
 // The push request message
 type PushRequest struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	NoticeId      string                 `protobuf:"bytes,1,opt,name=notice_id,json=noticeId,proto3" json:"notice_id,omitempty"`
-	Infohash      string                 `protobuf:"bytes,2,opt,name=infohash,proto3" json:"infohash,omitempty"`
-	Filename      string                 `protobuf:"bytes,3,opt,name=filename,proto3" json:"filename,omitempty"`
-	Work          string                 `protobuf:"bytes,4,opt,name=work,proto3" json:"work,omitempty"`
-	StartedAt     int64                  `protobuf:"varint,5,opt,name=started_at,json=startedAt,proto3" json:"started_at,omitempty"`
-	Email         string                 `protobuf:"bytes,6,opt,name=email,proto3" json:"email,omitempty"`
-	Description   string                 `protobuf:"bytes,7,opt,name=description,proto3" json:"description,omitempty"`
-	Subject       string                 `protobuf:"bytes,8,opt,name=subject,proto3" json:"subject,omitempty"`
-	Cause         PushRequest_Cause      `protobuf:"varint,9,opt,name=cause,proto3,enum=PushRequest_Cause" json:"cause,omitempty"`
-	Source        PushRequest_Source     `protobuf:"varint,10,opt,name=source,proto3,enum=PushRequest_Source" json:"source,omitempty"`
+	state       protoimpl.MessageState `protogen:"open.v1"`
+	NoticeId    string                 `protobuf:"bytes,1,opt,name=notice_id,json=noticeId,proto3" json:"notice_id,omitempty"`
+	Infohash    string                 `protobuf:"bytes,2,opt,name=infohash,proto3" json:"infohash,omitempty"`
+	Filename    string                 `protobuf:"bytes,3,opt,name=filename,proto3" json:"filename,omitempty"`
+	Work        string                 `protobuf:"bytes,4,opt,name=work,proto3" json:"work,omitempty"`
+	StartedAt   int64                  `protobuf:"varint,5,opt,name=started_at,json=startedAt,proto3" json:"started_at,omitempty"`
+	Email       string                 `protobuf:"bytes,6,opt,name=email,proto3" json:"email,omitempty"`
+	Description string                 `protobuf:"bytes,7,opt,name=description,proto3" json:"description,omitempty"`
+	Subject     string                 `protobuf:"bytes,8,opt,name=subject,proto3" json:"subject,omitempty"`
+	Cause       PushRequest_Cause      `protobuf:"varint,9,opt,name=cause,proto3,enum=PushRequest_Cause" json:"cause,omitempty"`
+	Source      PushRequest_Source     `protobuf:"varint,10,opt,name=source,proto3,enum=PushRequest_Source" json:"source,omitempty"`
+	// Raw SHA-256 content fingerprints of the blocked payload, supplied by the
+	// caller (it has both this service and torrent-store to hand; having
+	// abuse-store fetch them itself would close a dependency cycle). Optional —
+	// a ban without them still works, it just does not cover re-uploads.
+	Fingerprints  [][]byte `protobuf:"bytes,11,rep,name=fingerprints,proto3" json:"fingerprints,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -273,10 +278,21 @@ func (x *PushRequest) GetSource() PushRequest_Source {
 	return PushRequest_MAIL
 }
 
-// The check request message containing the infoHash
+func (x *PushRequest) GetFingerprints() [][]byte {
+	if x != nil {
+		return x.Fingerprints
+	}
+	return nil
+}
+
+// The check request message containing the infoHash and, optionally, the
+// content fingerprints of the same torrent. A match on either blocks: the
+// infohash catches the exact torrent, a fingerprint catches the same payload
+// republished under a different name.
 type CheckRequest struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	Infohash      string                 `protobuf:"bytes,1,opt,name=infohash,proto3" json:"infohash,omitempty"`
+	Fingerprints  [][]byte               `protobuf:"bytes,2,rep,name=fingerprints,proto3" json:"fingerprints,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -316,6 +332,13 @@ func (x *CheckRequest) GetInfohash() string {
 		return x.Infohash
 	}
 	return ""
+}
+
+func (x *CheckRequest) GetFingerprints() [][]byte {
+	if x != nil {
+		return x.Fingerprints
+	}
+	return nil
 }
 
 // The check response message containing existance flag
@@ -368,7 +391,7 @@ var File_proto_abuse_store_proto protoreflect.FileDescriptor
 const file_proto_abuse_store_proto_rawDesc = "" +
 	"\n" +
 	"\x17proto/abuse-store.proto\"\v\n" +
-	"\tPushReply\"\xa4\x03\n" +
+	"\tPushReply\"\xc8\x03\n" +
 	"\vPushRequest\x12\x1b\n" +
 	"\tnotice_id\x18\x01 \x01(\tR\bnoticeId\x12\x1a\n" +
 	"\binfohash\x18\x02 \x01(\tR\binfohash\x12\x1a\n" +
@@ -381,7 +404,8 @@ const file_proto_abuse_store_proto_rawDesc = "" +
 	"\asubject\x18\b \x01(\tR\asubject\x12(\n" +
 	"\x05cause\x18\t \x01(\x0e2\x12.PushRequest.CauseR\x05cause\x12+\n" +
 	"\x06source\x18\n" +
-	" \x01(\x0e2\x13.PushRequest.SourceR\x06source\"F\n" +
+	" \x01(\x0e2\x13.PushRequest.SourceR\x06source\x12\"\n" +
+	"\ffingerprints\x18\v \x03(\fR\ffingerprints\"F\n" +
 	"\x05Cause\x12\x13\n" +
 	"\x0fILLEGAL_CONTENT\x10\x00\x12\v\n" +
 	"\aMALWARE\x10\x01\x12\r\n" +
@@ -389,9 +413,10 @@ const file_proto_abuse_store_proto_rawDesc = "" +
 	"\bQUESTION\x10\x03\"\x1c\n" +
 	"\x06Source\x12\b\n" +
 	"\x04MAIL\x10\x00\x12\b\n" +
-	"\x04FORM\x10\x01\"*\n" +
+	"\x04FORM\x10\x01\"N\n" +
 	"\fCheckRequest\x12\x1a\n" +
-	"\binfohash\x18\x01 \x01(\tR\binfohash\"$\n" +
+	"\binfohash\x18\x01 \x01(\tR\binfohash\x12\"\n" +
+	"\ffingerprints\x18\x02 \x03(\fR\ffingerprints\"$\n" +
 	"\n" +
 	"CheckReply\x12\x16\n" +
 	"\x06exists\x18\x01 \x01(\bR\x06exists2W\n" +

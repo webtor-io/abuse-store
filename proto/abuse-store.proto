@@ -36,11 +36,20 @@ message PushRequest {
     FORM = 1;
   }
   Source source      = 10;
+  // Raw SHA-256 content fingerprints of the blocked payload, supplied by the
+  // caller (it has both this service and torrent-store to hand; having
+  // abuse-store fetch them itself would close a dependency cycle). Optional —
+  // a ban without them still works, it just does not cover re-uploads.
+  repeated bytes fingerprints = 11;
 }
 
-// The check request message containing the infoHash
+// The check request message containing the infoHash and, optionally, the
+// content fingerprints of the same torrent. A match on either blocks: the
+// infohash catches the exact torrent, a fingerprint catches the same payload
+// republished under a different name.
 message CheckRequest {
   string infohash = 1;
+  repeated bytes fingerprints = 2;
 }
 
 // The check response message containing existance flag

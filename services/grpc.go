@@ -121,12 +121,16 @@ func (s *GRPC) Push(ctx context.Context, in *pb.PushRequest) (*pb.PushReply, err
 		Source:      int(in.GetSource()),
 	}
 	if in.GetCause() == pb.PushRequest_ILLEGAL_CONTENT {
+		// Deduplicate on the REPORT, not on the payload: the fingerprints are
+		// deliberately not passed here. A newly reported infohash whose payload
+		// is already blocked still deserves its own abuse row, otherwise the
+		// audit trail loses the fact that it was reported at all.
 		r, err := s.Check(ctx, &pb.CheckRequest{Infohash: infohash})
 		if err != nil {
 			return nil, err
 		}
 		if !r.Exists {
-			err = s.store.Push(a)
+			err = s.store.Push(a, in.GetFingerprints())
 			if err != nil {
 				return nil, err
 			}
@@ -157,7 +161,7 @@ func (s *GRPC) Push(ctx context.Context, in *pb.PushRequest) (*pb.PushReply, err
 }
 
 func (s *GRPC) Check(_ context.Context, in *pb.CheckRequest) (*pb.CheckReply, error) {
-	err := s.store.Check(in.GetInfohash())
+	err := s.store.Check(in.GetInfohash(), in.GetFingerprints())
 	if errors.Is(err, ErrNotFound) {
 		return &pb.CheckReply{Exists: false}, nil
 	} else if err != nil {
