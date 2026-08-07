@@ -2,8 +2,11 @@ package main
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"os"
+	"strings"
 	"time"
 
 	"github.com/urfave/cli"
@@ -59,6 +62,10 @@ func main() {
 					Name:  "description, desc, d",
 					Usage: "Description of DMCA abuse (empty by default)",
 				},
+				cli.StringSliceFlag{
+					Name:  "fingerprint, fp",
+					Usage: "hex content fingerprint of the payload (repeatable); ask torrent-store for it. Without one the ban covers only this infohash, not re-uploads under other names",
+				},
 				cli.StringFlag{
 					Name:  "notice-id, id",
 					Usage: "ID of DMCA abuse (uuid by default)",
@@ -83,15 +90,27 @@ func main() {
 
 				ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
 				defer cancel()
+				var fps [][]byte
+				for _, h := range c.StringSlice("fingerprint") {
+					d, derr := hex.DecodeString(strings.TrimSpace(h))
+					if derr != nil {
+						return fmt.Errorf("fingerprint %q is not hex: %w", h, derr)
+					}
+					if len(d) != sha256.Size {
+						return fmt.Errorf("fingerprint %q is %d bytes, want %d", h, len(d), sha256.Size)
+					}
+					fps = append(fps, d)
+				}
 				_, err = cl.Push(ctx, &pb.PushRequest{
-					Work:        c.String("work"),
-					Filename:    c.String("filename"),
-					Infohash:    c.String("infohash"),
-					Email:       c.String("email"),
-					Description: c.String("description"),
-					NoticeId:    c.String("notice-id"),
-					Source:      pb.PushRequest_FORM,
-					Cause:       pb.PushRequest_ILLEGAL_CONTENT,
+					Fingerprints: fps,
+					Work:         c.String("work"),
+					Filename:     c.String("filename"),
+					Infohash:     c.String("infohash"),
+					Email:        c.String("email"),
+					Description:  c.String("description"),
+					NoticeId:     c.String("notice-id"),
+					Source:       pb.PushRequest_FORM,
+					Cause:        pb.PushRequest_ILLEGAL_CONTENT,
 				})
 				if err != nil {
 					return err
