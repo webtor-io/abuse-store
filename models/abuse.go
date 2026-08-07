@@ -16,9 +16,14 @@ type Abuse struct {
 	Description string    `pg:"description"`
 	Email       string    `pg:"email"`
 	Subject     string    `pg:"subject"`
-	Cause       int       `pg:"cause"`
-	Source      int       `pg:"source"`
-	StartedAt   time.Time `pg:"started_at"`
+	// use_zero on both: go-pg omits zero-valued fields from an INSERT, and
+	// the zero values here are the common ones — ILLEGAL_CONTENT is cause 0
+	// and MAIL is source 0. Without the tag they land as NULL, which is how
+	// 942 of 1092 rows ended up with no cause at all: every audit query
+	// filtering `cause = 0` silently missed them.
+	Cause     int       `pg:"cause,use_zero"`
+	Source    int       `pg:"source,use_zero"`
+	StartedAt time.Time `pg:"started_at"`
 	// Fingerprint is the raw SHA-256 identifying the blocked payload, or nil
 	// when the report is not about one (DMCA notices, questions) or predates
 	// the column.

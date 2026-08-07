@@ -50,23 +50,35 @@ func NewStore(c *cli.Context, b *badger.DB, p *cs.PG) *Store {
 	}
 }
 
+// Sync loads the whole abuse table into the local cache. A row that cannot be
+// cached is logged and skipped rather than aborting the walk: ForEach stops at
+// the first error, so one unusable row would leave every row after it
+// uncached — and, because serve() treats the startup Sync as fatal, would put
+// the pod in a crash loop. The stoplist must degrade by one entry, not
+// wholesale.
 func (s *Store) Sync() error {
 	pg := s.p.Get()
 	if pg == nil {
 		return errors.New("database not initialized")
 	}
 	log.Info("DB syncing started")
+	var synced, failed int
 	err := pg.Model(&m.Abuse{}).ForEach(func(a *m.Abuse) error {
-		err := s.pushToCache(a)
-		if err != nil {
-			return err
+		if s.syncRow(a) {
+			synced++
+		} else {
+			failed++
 		}
 		return nil
 	})
 	if err != nil {
 		return err
 	}
-	log.Info("DB syncing finished")
+	if failed > 0 {
+		log.WithField("synced", synced).WithField("failed", failed).Warn("DB syncing finished with unusable rows")
+		return nil
+	}
+	log.WithField("synced", synced).Info("DB syncing finished")
 	return nil
 }
 
@@ -133,21 +145,43 @@ func (s *Store) pushFingerprintToCache(v []byte) error {
 	})
 }
 
+// syncRow caches one row and reports whether it made it. It never returns an
+// error: it is the ForEach callback's whole body, and ForEach stops the walk
+// on the first error returned.
+func (s *Store) syncRow(a *m.Abuse) bool {
+	if err := s.pushToCache(a); err != nil {
+		log.WithError(err).WithField("infohash", a.Infohash).WithField("notice_id", a.NoticeID).Error("failed to cache abuse row, skipping")
+		return false
+	}
+	return true
+}
+
+// pushToCache mirrors one abuse row into the local cache: the payload
+// fingerprint first, then the infohash entry.
+//
+// The fingerprint goes first deliberately. Badger refuses an empty key, so a
+// row with no infohash — which the RPC now rejects, but which older rows and
+// other writers can still produce — used to fail before its fingerprint was
+// ever written, losing the one part of it that was usable. An empty infohash
+// is now skipped with a warning instead.
 func (s *Store) pushToCache(a *m.Abuse) error {
+	if len(a.Fingerprint) == fingerprintSize {
+		if err := s.pushFingerprintToCache(a.Fingerprint); err != nil {
+			return errors.Wrap(err, "failed to cache fingerprint")
+		}
+	}
+	if a.Infohash == "" {
+		log.WithField("notice_id", a.NoticeID).Warn("abuse row has no infohash, caching fingerprint only")
+		return nil
+	}
 	aa, err := json.Marshal(a)
 	if err != nil {
 		return errors.Wrapf(err, "failed to marshal data abuse=%v", a)
 	}
-	if err = s.b.Update(func(txn *badger.Txn) error {
+	return s.b.Update(func(txn *badger.Txn) error {
 		e := badger.NewEntry([]byte(a.Infohash), aa)
 		return txn.SetEntry(e)
-	}); err != nil {
-		return err
-	}
-	if len(a.Fingerprint) == fingerprintSize {
-		return s.pushFingerprintToCache(a.Fingerprint)
-	}
-	return nil
+	})
 }
 
 func (s *Store) Serve() error {

@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net"
 	"regexp"
+	"strings"
 	"time"
 
 	"github.com/pkg/errors"
@@ -22,6 +23,19 @@ import (
 )
 
 const resourceBannedSubject = "resource.banned"
+
+// infohashRe matches a full v1 infohash and nothing else. It is anchored:
+// the previous pattern was not, so any string containing five hex characters
+// anywhere passed — which is how 51 rows carrying magnet URIs and web links
+// got stored verbatim as stoplist keys, blocking nothing.
+var infohashRe = regexp.MustCompile(`^[0-9a-f]{40}$`)
+
+// normalizeInfohash trims and lowercases before validation, so a hash pasted
+// in upper case (as many trackers emit) is accepted rather than rejected or,
+// worse, silently reduced to nothing upstream.
+func normalizeInfohash(h string) string {
+	return strings.ToLower(strings.TrimSpace(h))
+}
 
 const (
 	grpcHostFlag = "grpc-host"
@@ -87,13 +101,18 @@ func (s *GRPC) Push(ctx context.Context, in *pb.PushRequest) (*pb.PushReply, err
 	if noticeID == "" {
 		noticeID = fmt.Sprintf("%s", uuid.NewV4())
 	}
-	infohash := in.GetInfohash()
-	if infohash != "" {
-		match, _ := regexp.MatchString("[0-9a-f]{5,40}", infohash)
+	infohash := normalizeInfohash(in.GetInfohash())
+	if infohash != "" && !infohashRe.MatchString(infohash) {
+		return nil, status.Error(codes.InvalidArgument, "wrong infohash")
+	}
 
-		if !match {
-			return nil, status.Error(codes.InvalidArgument, "wrong infohash")
-		}
+	// A ban has to name what it bans. Without either arm the row is dead
+	// weight: no infohash to key the stoplist on, no fingerprint to catch
+	// re-uploads — and it used to be worse than useless, because a row with
+	// no infohash could not be cached at all and took the whole sync down
+	// with it.
+	if in.GetCause() == pb.PushRequest_ILLEGAL_CONTENT && infohash == "" && len(in.GetFingerprint()) != fingerprintSize {
+		return nil, status.Error(codes.InvalidArgument, "illegal content report needs an infohash or a content fingerprint")
 	}
 
 	email := in.GetEmail()
