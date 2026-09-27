@@ -8,7 +8,7 @@ require (
 	github.com/satori/go.uuid v1.2.0
 	github.com/sirupsen/logrus v1.9.3
 	github.com/urfave/cli v1.22.17
-	github.com/webtor-io/common-services v0.0.0-20260323152956-4a4e97f013f7
+	github.com/webtor-io/common-services v0.0.0-20260927094256-ddfbf24ea805
 	google.golang.org/grpc v1.74.2
 	google.golang.org/protobuf v1.36.10
 )
