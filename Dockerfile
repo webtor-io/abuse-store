@@ -4,7 +4,7 @@ FROM alpine:latest as deps
 RUN apk update && apk upgrade && \
     apk add --no-cache ca-certificates curl
 
-FROM golang:1.25 as build
+FROM golang:latest as build
 
 # set work dir
 WORKDIR /app

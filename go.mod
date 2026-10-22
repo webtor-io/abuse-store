@@ -1,6 +1,6 @@
 module github.com/webtor-io/abuse-store
 
-go 1.25
+go 1.27
 
 require (
 	github.com/dgraph-io/badger/v3 v3.2103.5
