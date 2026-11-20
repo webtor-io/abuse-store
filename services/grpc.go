@@ -2,7 +2,6 @@ package services
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"net"
 	"regexp"
@@ -15,15 +14,12 @@ import (
 	"github.com/urfave/cli"
 	m "github.com/webtor-io/abuse-store/models"
 	pb "github.com/webtor-io/abuse-store/proto"
-	cs "github.com/webtor-io/common-services"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 
 	log "github.com/sirupsen/logrus"
 )
-
-const resourceBannedSubject = "resource.banned"
 
 // infohashRe matches a full v1 infohash and nothing else. It is anchored:
 // the previous pattern was not, so any string containing five hex characters
@@ -73,18 +69,16 @@ type GRPC struct {
 	ln     net.Listener
 	store  *Store
 	mailer *Mailer
-	nats   *cs.NATS
 	mu     sync.Mutex
 	gs     *grpc.Server
 }
 
-func NewGRPC(c *cli.Context, s *Store, mr *Mailer, nats *cs.NATS) *GRPC {
+func NewGRPC(c *cli.Context, s *Store, mr *Mailer) *GRPC {
 	return &GRPC{
 		host:   c.String(grpcHostFlag),
 		port:   c.Int(grpcPortFlag),
 		store:  s,
 		mailer: mr,
-		nats:   nats,
 	}
 }
 
@@ -186,7 +180,7 @@ func (s *GRPC) Push(ctx context.Context, in *pb.PushRequest) (*pb.PushReply, err
 		// Always publish on ILLEGAL_CONTENT — a duplicate report re-triggers
 		// downstream cleanup, recovering from a previously dropped publish.
 		// Consumers must be idempotent.
-		s.publishBanned(infohash)
+		s.store.PublishBanned(infohash)
 		if r.Exists {
 			return nil, status.Errorf(codes.AlreadyExists, "abuse notice with infoHash=%v already exists", infohash)
 		}
@@ -224,32 +218,6 @@ func (s *GRPC) Check(_ context.Context, in *pb.CheckRequest) (*pb.CheckReply, er
 	} else {
 		return &pb.CheckReply{Exists: true}, nil
 	}
-}
-
-func (s *GRPC) publishBanned(infohash string) {
-	if s.nats == nil {
-		return
-	}
-	if infohash == "" {
-		return
-	}
-	nc := s.nats.Get()
-	if nc == nil {
-		log.WithField("infohash", infohash).Error("failed to get nats connection, skipping resource.banned publish")
-		return
-	}
-	body, err := json.Marshal(struct {
-		Infohash string `json:"infohash"`
-	}{Infohash: infohash})
-	if err != nil {
-		log.WithError(err).WithField("infohash", infohash).Error("failed to marshal resource.banned payload")
-		return
-	}
-	if err := nc.Publish(resourceBannedSubject, body); err != nil {
-		log.WithError(err).WithField("infohash", infohash).Error("failed to publish resource.banned")
-		return
-	}
-	log.WithField("infohash", infohash).Info("published resource.banned")
 }
 
 // Close drains in-flight RPCs before returning.

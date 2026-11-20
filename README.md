@@ -41,7 +41,7 @@ The platform's JetStream stream `common` captures `resource.*`, so any consumer 
 - `web-ui` — drops the resource from `library`, `watch_history`, `cache_index`, `torrent_resource`, media metadata and the `vault.pledge` / `vault.tx_log` / `vault.resource` tables (refunding VP).
 - `vault` — queues the resource for deletion (S3 + own DB) via `ResourceQueueForDeletion`.
 
-Publishing is best-effort and never fails the RPC. Consumers must be idempotent — duplicate reports re-fire the event by design, which lets a re-submitted form recover from a transient NATS outage.
+Publishing is best-effort and never fails the RPC. Consumers must be idempotent — duplicate reports re-fire the event by design. Each periodic sync also publishes every blocking infohash not yet recorded in `banned_published` and forgets the ones that stopped blocking, so a failed publish, a row inserted by hand, or an exemption lifted (`exempt` back to false) is fanned out within one `--sync-interval`.
 
 ## Build & run
 

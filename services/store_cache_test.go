@@ -161,3 +161,24 @@ func TestExemptRowWithoutInfohashExemptsOnlyItself(t *testing.T) {
 		t.Fatal("fingerprint-only ban lost to an exempt row with no infohash")
 	}
 }
+
+// The fan-out set is exactly the infohashes that block: no fingerprint keys
+// (resource.banned is keyed by infohash), no empty key from fingerprint-only
+// rows, nothing exempt or shadowed by an exemption.
+func TestBlockingInfohashesIsWhatTheFanOutPublishes(t *testing.T) {
+	s := newTestStore(t)
+	const banned, cleared = "7777777777777777777777777777777777777777", "8888888888888888888888888888888888888888"
+	keep, _, _, _ := s.load([]*m.Abuse{
+		{Infohash: banned, Fingerprint: digest(0x01)},
+		{Fingerprint: digest(0x02)},
+		{Infohash: cleared},
+		{Infohash: cleared, Exempt: true},
+	})
+	got := blockingInfohashes(keep)
+	if len(got) != 1 {
+		t.Fatalf("fan-out set = %v, want only %s", got, banned)
+	}
+	if _, ok := got[banned]; !ok {
+		t.Fatalf("fan-out set = %v, want %s", got, banned)
+	}
+}

@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/hex"
 	"encoding/json"
+	"strings"
 	"sync"
 	"time"
 
@@ -47,13 +48,16 @@ type Store struct {
 	mu sync.Mutex
 	b  *badger.DB
 	p  *cs.PG
+	n  *cs.NATS
 	si time.Duration
 }
 
-func NewStore(c *cli.Context, b *badger.DB, p *cs.PG) *Store {
+// NewStore takes NATS for the resource.banned fan-out; nil disables it.
+func NewStore(c *cli.Context, b *badger.DB, p *cs.PG, n *cs.NATS) *Store {
 	return &Store{
 		b:  b,
 		p:  p,
+		n:  n,
 		si: time.Duration(c.Int(storeSyncIntervalFlag)) * time.Minute,
 	}
 }
@@ -80,7 +84,15 @@ func (s *Store) Sync() error {
 	if err != nil {
 		return errors.Wrap(err, "failed to prune cache")
 	}
-	l := log.WithField("synced", synced).WithField("exempt", exempt).WithField("pruned", pruned)
+	// The fan-out is housekeeping: its failure is logged and retried next
+	// sync, never allowed to fail Sync — the startup Sync is fatal, and the
+	// stoplist itself is already in place.
+	published, cleared, err := s.fanOut(blockingInfohashes(keep))
+	if err != nil {
+		log.WithError(err).Error("failed to fan out bans")
+	}
+	l := log.WithField("synced", synced).WithField("exempt", exempt).WithField("pruned", pruned).
+		WithField("published", published).WithField("unpublished", cleared)
 	if failed > 0 {
 		l.WithField("failed", failed).Warn("DB syncing finished with unusable rows")
 		return nil
@@ -126,6 +138,105 @@ func (s *Store) load(rows []*m.Abuse) (keep map[string]struct{}, synced, failed,
 		}
 	}
 	return keep, synced, failed, len(ex)
+}
+
+// blockingInfohashes picks the infohash keys out of a load's keep set: what
+// blocks by infohash right now, and so what web-ui and vault must have purged.
+func blockingInfohashes(keep map[string]struct{}) map[string]struct{} {
+	b := map[string]struct{}{}
+	for k := range keep {
+		if k != "" && !strings.HasPrefix(k, "fp:") {
+			b[k] = struct{}{}
+		}
+	}
+	return b
+}
+
+const resourceBannedSubject = "resource.banned"
+
+// PublishBanned fans a ban out as resource.banned and records it, so Sync
+// does not publish it again. Best effort: a failure is logged, and since
+// nothing is recorded, Sync retries it on its next pass.
+func (s *Store) PublishBanned(h string) {
+	if !s.publish(h) {
+		return
+	}
+	pg := s.p.Get()
+	if pg == nil {
+		return
+	}
+	if _, err := pg.Exec(`INSERT INTO banned_published (infohash) VALUES (?)
+		ON CONFLICT (infohash) DO UPDATE SET published_at = now()`, h); err != nil {
+		log.WithError(err).WithField("infohash", h).Error("failed to record resource.banned publish")
+	}
+}
+
+// fanOut publishes resource.banned for every infohash that blocks but was
+// never published, and forgets every recorded one that no longer blocks, so a
+// ban that comes back — an exemption lifted, a deleted row re-added, a row
+// inserted by hand — reaches web-ui and vault like a fresh report. Without
+// NATS nothing is published or recorded.
+func (s *Store) fanOut(blocking map[string]struct{}) (published, cleared int, err error) {
+	if s.n == nil {
+		return 0, 0, nil
+	}
+	pg := s.p.Get()
+	if pg == nil {
+		return 0, 0, errors.New("database not initialized")
+	}
+	var done []string
+	if _, err := pg.Query(&done, `SELECT infohash FROM banned_published`); err != nil {
+		return 0, 0, errors.Wrap(err, "failed to list published bans")
+	}
+	recorded := make(map[string]struct{}, len(done))
+	for _, h := range done {
+		recorded[h] = struct{}{}
+		if _, ok := blocking[h]; ok {
+			continue
+		}
+		if _, err := pg.Exec(`DELETE FROM banned_published WHERE infohash = ?`, h); err != nil {
+			return published, cleared, errors.Wrap(err, "failed to forget unblocked ban")
+		}
+		cleared++
+	}
+	for h := range blocking {
+		if _, ok := recorded[h]; ok {
+			continue
+		}
+		if !s.publish(h) {
+			continue
+		}
+		if _, err := pg.Exec(`INSERT INTO banned_published (infohash) VALUES (?) ON CONFLICT DO NOTHING`, h); err != nil {
+			return published, cleared, errors.Wrap(err, "failed to record published ban")
+		}
+		published++
+	}
+	return published, cleared, nil
+}
+
+// publish sends resource.banned and reports whether it went out.
+func (s *Store) publish(h string) bool {
+	if s.n == nil || h == "" {
+		return false
+	}
+	nc := s.n.Get()
+	if nc == nil {
+		log.WithField("infohash", h).Error("failed to get nats connection, skipping resource.banned publish")
+		return false
+	}
+	body, err := json.Marshal(struct {
+		Infohash string `json:"infohash"`
+	}{Infohash: h})
+	if err != nil {
+		log.WithError(err).WithField("infohash", h).Error("failed to marshal resource.banned payload")
+		return false
+	}
+	if err := nc.Publish(resourceBannedSubject, body); err != nil {
+		log.WithError(err).WithField("infohash", h).Error("failed to publish resource.banned")
+		return false
+	}
+	log.WithField("infohash", h).Info("published resource.banned")
+	return true
 }
 
 // IsExempt reports whether the infohash was reviewed and exempted. It asks

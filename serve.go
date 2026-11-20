@@ -56,8 +56,14 @@ func serve(c *cli.Context) error {
 		_ = b.Close()
 	}(b)
 
+	// Setting NATS — before the Store: Sync fans bans out through it.
+	nats := cs.NewNATS(c)
+	if nats != nil {
+		defer nats.Close()
+	}
+
 	// Setting Store
-	st := s.NewStore(c, b, pg)
+	st := s.NewStore(c, b, pg, nats)
 	err = st.Sync()
 	if err != nil {
 		return err
@@ -69,18 +75,12 @@ func serve(c *cli.Context) error {
 	// Setting Mailer
 	mr := s.NewMailer(c, smtp)
 
-	// Setting NATS
-	nats := cs.NewNATS(c)
-	if nats != nil {
-		defer nats.Close()
-	}
-
 	// Setting Probe
 	probe := cs.NewProbe(c)
 	defer probe.Close()
 
 	// Setting GRPC
-	grpc := s.NewGRPC(c, st, mr, nats)
+	grpc := s.NewGRPC(c, st, mr)
 	defer grpc.Close()
 
 	// Setting Serve
