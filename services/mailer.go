@@ -122,7 +122,11 @@ func (s *Mailer) SendSupportEmail(a *m.Abuse) error {
 		return err
 	}
 
-	err = s.smtp.Send(s.sender, s.support, a.Email, fmt.Sprintf("[%s] %s", a.NoticeID, a.Subject), body)
+	subject := fmt.Sprintf("[%s] %s", a.NoticeID, a.Subject)
+	if a.Exempt {
+		subject = "[exempt] " + subject
+	}
+	err = s.smtp.Send(s.sender, s.support, a.Email, subject, body)
 
 	if err != nil {
 		return errors.Wrap(err, "failed to send support notification")

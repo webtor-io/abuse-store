@@ -1,6 +1,8 @@
 Hi!
 
-{{ if .Abuse | IsIllegal }} 
+{{ if .Abuse.Exempt }}
+Thank you for your request! It has been received and is under moderation.
+{{ else if .Abuse | IsIllegal }}
 This torrent added to stoplist and will become unavailable for users in an hour.
 All connected cached content will be purged as well.
 {{ else }}

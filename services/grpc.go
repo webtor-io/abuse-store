@@ -155,6 +155,20 @@ func (s *GRPC) Push(ctx context.Context, in *pb.PushRequest) (*pb.PushReply, err
 		Source:      int(in.GetSource()),
 	}
 	if in.GetCause() == pb.PushRequest_ILLEGAL_CONTENT {
+		// A reviewed, exempt infohash is not banned again: no row, no
+		// resource.banned purge. To the reporter it looks like any accepted
+		// report (success here, "under moderation" in the letter); support
+		// gets the letter marked exempt, so every repeat request is seen.
+		exempt, err := s.store.IsExempt(infohash)
+		if err != nil {
+			return nil, errors.Wrap(err, "failed to check exemption")
+		}
+		if exempt {
+			a.Exempt = true
+			s.notify(a)
+			log.WithField("infohash", infohash).Info("report for exempt infohash not added to stoplist")
+			return &pb.PushReply{}, nil
+		}
 		// Deduplicate on the REPORT, not on the payload: the fingerprints are
 		// deliberately not passed here. A newly reported infohash whose payload
 		// is already blocked still deserves its own abuse row, otherwise the
@@ -177,21 +191,25 @@ func (s *GRPC) Push(ctx context.Context, in *pb.PushRequest) (*pb.PushReply, err
 			return nil, status.Errorf(codes.AlreadyExists, "abuse notice with infoHash=%v already exists", infohash)
 		}
 	}
-	if email != "" {
+	s.notify(a)
+	return &pb.PushReply{}, nil
+}
+
+// notify mails the reporter (when they left an address) and support. Best
+// effort: failures are logged and never fail the RPC.
+func (s *GRPC) notify(a *m.Abuse) {
+	if a.Email != "" {
 		go func() {
-			err := s.mailer.SendUserEmail(a)
-			if err != nil {
+			if err := s.mailer.SendUserEmail(a); err != nil {
 				log.WithError(err).Error("failed to send user email")
 			}
 		}()
 	}
 	go func() {
-		err := s.mailer.SendSupportEmail(a)
-		if err != nil {
+		if err := s.mailer.SendSupportEmail(a); err != nil {
 			log.WithError(err).Error("failed to send support email")
 		}
 	}()
-	return &pb.PushReply{}, nil
 }
 
 func (s *GRPC) Check(_ context.Context, in *pb.CheckRequest) (*pb.CheckReply, error) {

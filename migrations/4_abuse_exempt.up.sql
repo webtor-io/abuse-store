@@ -1,0 +1,13 @@
+-- An exempt row records a reviewed infohash that must NOT be blocked.
+--
+-- Deleting a row lifts a ban, but the next report of the same infohash puts
+-- it straight back — and fans out resource.banned, purging users' data again.
+-- An exempt row keeps the decision: the infohash never blocks, and a later
+-- ILLEGAL_CONTENT report for it is mailed to support but neither stored nor
+-- fanned out. Exempt beats every blocking row for the same infohash.
+--
+-- Set it by hand:
+--   UPDATE abuse SET exempt = true WHERE infohash = '<hash>';
+-- or, when the row is already gone:
+--   INSERT INTO abuse (infohash, exempt, description) VALUES ('<hash>', true, '<why>');
+ALTER TABLE abuse ADD COLUMN exempt boolean NOT NULL DEFAULT false;

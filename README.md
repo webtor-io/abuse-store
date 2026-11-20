@@ -18,15 +18,15 @@ gRPC client ──► Push / Check  ─┬─► PostgreSQL  (source of truth, p
 ```
 
 - **PostgreSQL** stores the canonical abuse records (`migrations/1_abuse.up.sql`).
-- **BadgerDB** at `/tmp/badger` holds an infohash-keyed cache used by `Check`. It is loaded from the full `abuse` table on startup (`Store.Sync`) and refreshed every `--sync-interval` minutes — this is the only mechanism that propagates inserts between replicas, so don't expect sub-second cross-pod consistency.
+- **BadgerDB** at `/tmp/badger` holds an infohash-keyed cache used by `Check`. It is loaded from the full `abuse` table on startup (`Store.Sync`) and refreshed every `--sync-interval` minutes — this is the only mechanism that propagates inserts and deletions between replicas (a deleted row stops blocking within one interval), so don't expect sub-second cross-pod consistency.
 - **SMTP** delivery is best-effort and runs in goroutines; failures are logged but don't fail the RPC.
 
 ## gRPC API
 
 Defined in [`proto/abuse-store.proto`](proto/abuse-store.proto):
 
-- `Push(PushRequest) → PushReply` — submit an abuse notice. `infohash` and `email` are validated; `notice_id` and `started_at` default to a fresh UUID and the current time. Only `ILLEGAL_CONTENT` causes a database write; duplicates by infohash are rejected with `ALREADY_EXISTS` but **still publish `resource.banned`** (recovery for a dropped first publish).
-- `Check(CheckRequest) → CheckReply` — returns `exists = true` if the infohash is in the stoplist (Badger lookup).
+- `Push(PushRequest) → PushReply` — submit an abuse notice. `infohash` and `email` are validated; `notice_id` and `started_at` default to a fresh UUID and the current time. Only `ILLEGAL_CONTENT` causes a database write; duplicates by infohash are rejected with `ALREADY_EXISTS` but **still publish `resource.banned`** (recovery for a dropped first publish). A report for an infohash marked `exempt` in the table is mailed as usual (the reporter is told it is under moderation, support sees it marked `[exempt]`) and succeeds, but is neither stored nor fanned out.
+- `Check(CheckRequest) → CheckReply` — returns `exists = true` if the infohash is in the stoplist (Badger lookup). Deleting a row or setting `exempt = true` lifts the block at the next sync.
 
 ## NATS events
 

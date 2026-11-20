@@ -26,7 +26,7 @@ Migrations are **not** a separate command — `serve` runs `cs.NewPGMigration(pg
 
 ⚠️ Migration 1 ends with `ALTER TABLE abuse OWNER TO abusestore;`, and **that role does not exist on the current database** — it last ran in 2022 on the old self-hosted cluster, and the table is owned by the connecting user now. Do not copy that line into a new migration; it would fail at pod start.
 
-Tests cover the `Check` blocking decision (`services/store_test.go`), which runs against an in-memory Badger and needs no Postgres. The rest of the service is untested.
+Tests cover the `Check` blocking decision, the sync load/prune (deletions and exempt rows) and the exempt letters (`services/*_test.go`), all against an in-memory Badger with no Postgres. `Sync`/`IsExempt` SQL and the gRPC `Push` branches are untested.
 
 The `Dockerfile` produces a static linux binary, copies `migrations/` into `/migrations`, and exposes `8081` (probes) + `50051` (gRPC). HTTP serving is *not* exposed (the service has no HTTP handlers).
 
@@ -42,8 +42,9 @@ The store has a non-obvious dual layout:
 Lifecycle (see `services/store.go`):
 - On startup, `Store.Sync()` iterates **the whole `abuse` table** and pushes every row into Badger. This is intentional — the entire stoplist is loaded on boot so `Check` is O(1) on a local KV with no PG hop.
 - `Push` writes to PG first, then mirrors into Badger (`pushToCache`).
-- `Store.Serve()` re-runs `Sync()` every `STORE_SYNC_INTERVAL` minutes (default 10) to pick up rows inserted by other replicas. **This is the only cross-replica consistency mechanism** — there is no pub/sub.
+- `Store.Serve()` re-runs `Sync()` every `STORE_SYNC_INTERVAL` minutes (default 10) to pick up rows inserted by other replicas and to prune keys whose rows were deleted (deleting a row lifts the ban within one interval). Push and Sync share a mutex so the prune cannot drop a row inserted mid-walk. **This is the only cross-replica consistency mechanism** — there is no pub/sub.
 - Badger lives on the pod's local filesystem at `/tmp/badger`; it is treated as ephemeral cache and rebuilt from PG on every restart.
+- **Exempt rows** (`abuse.exempt`, migration 4) record a reviewed infohash that must never block. `Store.load` drops every row for an exempt infohash, both arms, regardless of row order. Exemption is per infohash: another row whose fingerprint matches the same payload still blocks it via torrent-store's fingerprint-only `Check`. Set by hand: `UPDATE abuse SET exempt = true WHERE infohash = '<hash>'` (or `INSERT INTO abuse (infohash, exempt, description) VALUES (...)` if the row is gone).
 
 Implication: if you add a write path, write to PG first and let `pushToCache` mirror it. Do not add Badger-only writes — other replicas will not see them until the next sync tick.
 
@@ -52,7 +53,8 @@ Implication: if you add a write path, write to PG first and let `pushToCache` mi
 `services/grpc.go` implements `pb.AbuseStoreServer`:
 
 - `Push` validates `infohash` (`[0-9a-f]{5,40}` regex — lenient, partial hashes accepted) and `email`, fills defaults (`notice_id` → uuid, `subject` → `Abuse notice <id>`, `started_at` → now), and:
-  - For `ILLEGAL_CONTENT`: calls `Check`; persists only if not already present; **publishes `resource.banned` to NATS regardless** (new insert *and* duplicate report); returns `AlreadyExists` on duplicate.
+  - For `ILLEGAL_CONTENT` on an **exempt** infohash (`Store.IsExempt`, asks PG directly): no row, no `resource.banned`, both letters sent as usual (support subject gets `[exempt]` and an EXEMPT line; the reporter is told the request is "under moderation", never "added to stoplist"), and the RPC succeeds like any accepted report. Callers cannot tell it apart: a ban script sees only that the post-push `Check` stays false.
+  - For `ILLEGAL_CONTENT` otherwise: calls `Check`; persists only if not already present; **publishes `resource.banned` to NATS regardless** (new insert *and* duplicate report); returns `AlreadyExists` on duplicate.
   - For other causes: skips persistence and NATS entirely.
   - Fires `SendUserEmail` (only if reporter supplied an email) and `SendSupportEmail` in goroutines — failures are logged, not returned. Mail delivery is best-effort and not part of the RPC's success contract.
 - `Check` reads only Badger.
