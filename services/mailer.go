@@ -91,6 +91,7 @@ type NoticeHash struct {
 	Infohash string
 	Exempt   bool // reviewed and exempt: not stored, never purged
 	Existed  bool // already in the stoplist before this notice
+	Advanced bool // purge_now replaced a purge an earlier notice scheduled
 }
 
 func (n *Notice) AnyExempt() bool {

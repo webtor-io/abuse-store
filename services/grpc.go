@@ -210,14 +210,17 @@ func (s *GRPC) Push(ctx context.Context, in *pb.PushRequest) (*pb.PushReply, err
 	// purged early by a repeat report, and a dropped publish is retried by
 	// Sync. Only an immediate purge publishes here, duplicates included, and
 	// it brings their pending purge forward. Consumers must be idempotent.
+	advanced := 0
 	if n.PurgeNow {
-		for _, nh := range n.Hashes {
-			if !nh.Exempt {
-				s.store.PurgeNow(nh.Infohash)
+		for i := range n.Hashes {
+			if !n.Hashes[i].Exempt && s.store.PurgeNow(n.Hashes[i].Infohash) {
+				n.Hashes[i].Advanced = true
+				advanced++
 			}
 		}
 	}
-	if existed == len(hashes) {
+	// A purge brought forward is news to support, even with no new row.
+	if existed == len(hashes) && advanced == 0 {
 		return nil, status.Errorf(codes.AlreadyExists, "abuse notice with infoHash=%v already exists", strings.Join(hashes, ","))
 	}
 	s.notify(n)

@@ -13,9 +13,12 @@ import (
 // see that it was not.
 func TestExemptReportLetters(t *testing.T) {
 	ms := &Mailer{support: "support@example.com"}
-	for _, exempt := range []bool{false, true} {
+	for _, tc := range []struct{ exempt, purgeNow bool }{{false, false}, {true, false}, {false, true}, {true, true}} {
+		exempt := tc.exempt
 		const h = "465d6a0eac381e68ca77115f44f19f0c968b9590"
-		n := &Notice{Abuse: &m.Abuse{Infohash: h}, Hashes: []NoticeHash{{Infohash: h, Exempt: exempt}}}
+		// purge_now on an all-exempt notice purges nothing; the letter must
+		// not say it did.
+		n := &Notice{Abuse: &m.Abuse{Infohash: h}, Hashes: []NoticeHash{{Infohash: h, Exempt: exempt}}, PurgeNow: tc.purgeNow}
 		user, err := ms.render(n, userTemplate)
 		if err != nil {
 			t.Fatal(err)
@@ -34,7 +37,7 @@ func TestExemptReportLetters(t *testing.T) {
 			t.Errorf("exempt=%v: support letter marks EXEMPT = %v", exempt, got)
 		}
 		if got := strings.Contains(support, "Data purge"); got == exempt {
-			t.Errorf("exempt=%v: support letter announces a purge = %v", exempt, got)
+			t.Errorf("exempt=%v purge_now=%v: support letter announces a purge = %v", exempt, tc.purgeNow, got)
 		}
 	}
 }
@@ -62,10 +65,15 @@ func TestNoticeLettersListEveryHashAndThePurge(t *testing.T) {
 			t.Errorf("%s missing from a letter", h)
 		}
 	}
-	for _, want := range []string{b + " (already in the stoplist)", c + " (exempt)", "scheduled for 2026-11-24 09:30 UTC", "Setting exempt", "EXEMPT"} {
+	for _, want := range []string{b + " (already in the stoplist)", c + " (exempt)", "waits until 2026-11-24 09:30 UTC", "Setting exempt", "manual metadata backfill", "EXEMPT"} {
 		if !strings.Contains(support, want) {
 			t.Errorf("support letter lacks %q:\n%s", want, support)
 		}
+	}
+	// A manual backfill purges inside the window, so exempt cannot promise
+	// the data survives.
+	if strings.Contains(support, "keeps the data") {
+		t.Errorf("support letter promises the data is kept:\n%s", support)
 	}
 	if !strings.Contains(user, c+" (under moderation)") || !strings.Contains(user, "added to stoplist") {
 		t.Errorf("reporter letter:\n%s", user)
@@ -85,5 +93,15 @@ func TestNoticeLettersListEveryHashAndThePurge(t *testing.T) {
 	}
 	if !strings.Contains(support, "Data purge: immediate") || strings.Contains(support, "scheduled") {
 		t.Errorf("purge_now support letter:\n%s", support)
+	}
+
+	// ...and says when it replaced the purge an earlier notice scheduled.
+	n.Hashes[0].Advanced = true
+	support, err = ms.render(n, supportTemplate)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(support, b+" (already in the stoplist) (its scheduled purge replaced by this immediate one)") {
+		t.Errorf("brought-forward purge not marked:\n%s", support)
 	}
 }

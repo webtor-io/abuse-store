@@ -198,20 +198,25 @@ func (s *Store) PublishBanned(h string) {
 	}
 }
 
-// PurgeNow brings any pending purge of h forward to now and publishes it.
-// Moving purge_after first makes a failed publish one that Sync retries at
-// its next pass instead of after the delay.
-func (s *Store) PurgeNow(h string) {
+// PurgeNow brings any pending purge of h forward to now and publishes it, and
+// reports whether a pending purge was brought forward. Moving purge_after
+// first makes a failed publish one that Sync retries at its next pass instead
+// of after the delay.
+func (s *Store) PurgeNow(h string) (advanced bool) {
 	if h == "" {
-		return
+		return false
 	}
 	if pg := s.p.Get(); pg != nil {
 		now := time.Now()
-		if _, err := pg.Exec(`UPDATE abuse SET purge_after = ? WHERE infohash = ? AND purge_after > ?`, now, h, now); err != nil {
+		r, err := pg.Exec(`UPDATE abuse SET purge_after = ? WHERE infohash = ? AND purge_after > ?`, now, h, now)
+		if err != nil {
 			log.WithError(err).WithField("infohash", h).Error("failed to bring purge forward")
+		} else {
+			advanced = r.RowsAffected() > 0
 		}
 	}
 	s.PublishBanned(h)
+	return advanced
 }
 
 // fanOut publishes resource.banned for every infohash that blocks and is due

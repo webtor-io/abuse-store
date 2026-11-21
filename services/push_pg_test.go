@@ -244,6 +244,8 @@ func TestPGReviewInsideTheWindowKeepsTheData(t *testing.T) {
 
 // A repeat report does not purge a delayed ban early; a repeat with
 // purge_now does, and moves the schedule so a lost publish is retried by Sync.
+// Bringing the purge forward is news: OK and a letter to support. Once nothing
+// is pending, a purge_now repeat is AlreadyExists and silent again.
 func TestPGDuplicatePush(t *testing.T) {
 	e := newPGEnv(t, "72h")
 	e.push(t, &pb.PushRequest{Infohash: hashA})
@@ -253,14 +255,56 @@ func TestPGDuplicatePush(t *testing.T) {
 	if got := e.banned(); len(got) != 0 {
 		t.Fatalf("repeat report purged a delayed ban: %v", got)
 	}
-	if c := e.push(t, &pb.PushRequest{Infohash: hashA, PurgeNow: true}); c != codes.AlreadyExists {
-		t.Fatalf("repeat with purge_now: %v, want AlreadyExists", c)
+	e.sink.waitFor(t, 2)
+	e.sink.reset()
+
+	if c := e.push(t, &pb.PushRequest{Infohash: hashA, PurgeNow: true}); c != codes.OK {
+		t.Fatalf("repeat with purge_now bringing the purge forward: %v, want OK", c)
 	}
 	if got := e.banned(); !slices.Equal(got, []string{hashA}) {
 		t.Fatalf("purge_now repeat published %v, want [%s]", got, hashA)
 	}
 	if pending := e.count(t, `SELECT count(*) FROM abuse WHERE purge_after > now()`); pending != 0 {
 		t.Fatalf("%d rows still pending after purge_now", pending)
+	}
+	mail := e.sink.waitFor(t, 2)
+	var support []string
+	for _, l := range mail {
+		if l.rcpt == "support@example.com" {
+			support = append(support, l.body)
+		}
+	}
+	if len(support) != 1 || !strings.Contains(support[0], "Data purge: immediate") ||
+		!strings.Contains(support[0], hashA+" (already in the stoplist) (its scheduled purge replaced by this immediate one)") {
+		t.Fatalf("%d support letters, want 1 saying the purge replaced the schedule: %q", len(support), support)
+	}
+	e.sink.reset()
+
+	if c := e.push(t, &pb.PushRequest{Infohash: hashA, PurgeNow: true}); c != codes.AlreadyExists {
+		t.Fatalf("purge_now repeat of a purged ban: %v, want AlreadyExists", c)
+	}
+	if mail := e.sink.waitFor(t, 0); len(mail) != 0 {
+		t.Fatalf("%d letters for a purge_now repeat of a purged ban", len(mail))
+	}
+}
+
+// An exempt hash in a purge_now notice is not purged, whether purge_now or a
+// server with no delay makes it immediate.
+func TestPGPurgeNowSkipsExempt(t *testing.T) {
+	for _, tc := range []struct {
+		name, delay string
+		purgeNow    bool
+	}{{"purge_now", "72h", true}, {"delay 0", "0", false}} {
+		t.Run(tc.name, func(t *testing.T) {
+			e := newPGEnv(t, tc.delay)
+			e.exec(t, `INSERT INTO abuse (infohash, exempt) VALUES (?, true)`, hashC)
+			if c := e.push(t, &pb.PushRequest{Infohash: hashA, ExtraInfohashes: []string{hashC}, PurgeNow: tc.purgeNow}); c != codes.OK {
+				t.Fatalf("push: %v", c)
+			}
+			if got := e.banned(); !slices.Equal(got, []string{hashA}) {
+				t.Fatalf("published %v, want only [%s]", got, hashA)
+			}
+		})
 	}
 }
 
