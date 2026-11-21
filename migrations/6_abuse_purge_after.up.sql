@@ -1,0 +1,12 @@
+-- When the data behind a ban may be purged.
+--
+-- The block is immediate; the purge (resource.banned: web-ui and vault delete
+-- users' data for the infohash, irreversibly) waits until purge_after, so a
+-- report reviewed in the meantime can be set exempt or deleted while the data
+-- is still there. Sync publishes a blocking infohash only once one of its
+-- non-exempt rows is due.
+--
+-- NULL means due: every row written before this column was fanned out at
+-- Push (or seeded into banned_published), and a row inserted by hand without
+-- it should behave as it always has.
+ALTER TABLE abuse ADD COLUMN purge_after timestamptz;

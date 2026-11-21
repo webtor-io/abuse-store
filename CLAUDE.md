@@ -8,7 +8,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 1. **Stoplist** for torrents reported as illegal content. Other components (web-ui, torrent-http-proxy) call `Check(infohash)` before serving content; a positive answer blocks playback.
 2. **Mail relay** for every kind of incoming notice (illegal content, malware, app error, generic question), forwarding to support and acknowledging the reporter.
-3. **Cleanup fan-out** via NATS: on `Cause = ILLEGAL_CONTENT` it publishes `resource.banned` so downstream services (web-ui, vault) can purge their data for that infohash.
+3. **Cleanup fan-out** via NATS: once a `Cause = ILLEGAL_CONTENT` ban's purge delay (`--purge-delay`, default 72h) has passed, it publishes `resource.banned` so downstream services (web-ui, vault) purge their data for that infohash. The block is immediate; only the irreversible purge waits.
 
 Only `Cause = ILLEGAL_CONTENT` notices are persisted in the stoplist or fan out via NATS. Other causes (`MALWARE`, `APP_ERROR`, `QUESTION`) are passed through to email only — see `services/grpc.go` `Push`. Don't add `store.Push` calls for non-illegal causes without understanding this split.
 
@@ -26,7 +26,7 @@ Migrations are **not** a separate command — `serve` runs `cs.NewPGMigration(pg
 
 ⚠️ Migration 1 ends with `ALTER TABLE abuse OWNER TO abusestore;`, and **that role does not exist on the current database** — it last ran in 2022 on the old self-hosted cluster, and the table is owned by the connecting user now. Do not copy that line into a new migration; it would fail at pod start.
 
-Tests cover the `Check` blocking decision, the sync load/prune (deletions and exempt rows) and the exempt letters (`services/*_test.go`), all against an in-memory Badger with no Postgres. `Sync`/`IsExempt` SQL and the gRPC `Push` branches are untested.
+Tests cover the `Check` blocking decision, the sync load/prune (deletions and exempt rows), the purge-due rule and the letters (`services/*_test.go`), against an in-memory Badger with no Postgres. `services/push_pg_test.go` drives `Push` and `Sync` against a real Postgres and NATS (delayed and immediate purge, review inside the window, several hashes per notice); it is skipped unless `ABUSE_STORE_TEST_PG` and `ABUSE_STORE_TEST_NATS` are set — the file header has the two `docker run` lines. It wipes the database, so the name must end in `_test`. `client/main_test.go` checks the push flags reach the request.
 
 The `Dockerfile` produces a static linux binary, copies `migrations/` into `/migrations`, and exposes `8081` (probes) + `50051` (gRPC). HTTP serving is *not* exposed (the service has no HTTP handlers).
 
@@ -52,28 +52,30 @@ Implication: if you add a write path, write to PG first and let `pushToCache` mi
 
 `services/grpc.go` implements `pb.AbuseStoreServer`:
 
-- `Push` validates `infohash` (`[0-9a-f]{5,40}` regex — lenient, partial hashes accepted) and `email`, fills defaults (`notice_id` → uuid, `subject` → `Abuse notice <id>`, `started_at` → now), and:
-  - For `ILLEGAL_CONTENT` on an **exempt** infohash (`Store.IsExempt`, asks PG directly): no row, no `resource.banned`, both letters sent as usual (support subject gets `[exempt]` and an EXEMPT line; the reporter is told the request is "under moderation", never "added to stoplist"), and the RPC succeeds like any accepted report. Callers cannot tell it apart: a ban script sees only that the post-push `Check` stays false.
-  - For `ILLEGAL_CONTENT` otherwise: calls `Check`; persists only if not already present; **publishes `resource.banned` to NATS regardless** (new insert *and* duplicate report); returns `AlreadyExists` on duplicate.
+- `Push` takes the primary `infohash` plus any `extra_infohashes` of the same notice, validates each (anchored `^[0-9a-f]{40}$` after trim + lowercase; the primary may be empty for a fingerprint-only ban, an extra may not), drops repeats, validates `email`, fills defaults (`notice_id` → uuid, `subject` → `Abuse notice <id>`, `started_at` → now), and:
+  - For `ILLEGAL_CONTENT`, per hash: an **exempt** one (`Store.IsExempt`, asks PG directly) gets no row and no `resource.banned`; one already blocked (`Check`) gets no new row; every other gets its own row under the same `notice_id` (the fingerprint goes on the primary's row only), with `purge_after` = now + `--purge-delay`, or now for `purge_now`.
+  - `resource.banned` goes out at Push only for an immediate purge (`purge_now`, or a server with `--purge-delay 0`), for every non-exempt hash including already-blocked ones, whose pending `purge_after` is brought forward to now first (`Store.PurgeNow`). Otherwise Sync publishes once due. **A duplicate report without `purge_now` publishes nothing**: it must not purge a delayed ban early, and a dropped publish is retried by Sync anyway.
+  - Returns `AlreadyExists` only when every hash was already blocked and no pending purge was brought forward (`Store.PurgeNow` reports whether its UPDATE moved a row), and then sends no mail. A `purge_now` that did bring one forward succeeds and mails support, the hash marked as replacing its schedule. Exempt hashes are mailed as before: support subject gets `[exempt]` and the hash is marked; the reporter is told it is "under moderation", never "added to stoplist", and the RPC succeeds. Callers cannot tell it apart: a ban script sees only that the post-push `Check` stays false.
   - For other causes: skips persistence and NATS entirely.
-  - Fires `SendUserEmail` (only if reporter supplied an email) and `SendSupportEmail` in goroutines — failures are logged, not returned. Mail delivery is best-effort and not part of the RPC's success contract.
+  - Mails once per notice, whatever the number of hashes: `SendUserEmail` (only if reporter supplied an email) and `SendSupportEmail` in goroutines — failures are logged, not returned. Mail delivery is best-effort and not part of the RPC's success contract.
 - `Check` reads only Badger.
 
 ### NATS fan-out (`resource.banned`)
 
-`publishBanned` in `services/grpc.go` publishes `{"infohash":"..."}` to subject `resource.banned` (JetStream stream `common`, declared in `infra/helmfile/values/streams.yaml.gotmpl` with subject filter `resource.*`).
+`Store.PublishBanned` / `Store.publish` in `services/store.go` publish `{"infohash":"..."}` to subject `resource.banned` (JetStream stream `common`, declared in the platform's helmfile streams values with subject filter `resource.*`). Consumers purge irreversibly.
 
-Two non-obvious choices:
+Non-obvious choices:
 
-- **Always publish on `ILLEGAL_CONTENT`, even on duplicate.** A repeat report from the form re-triggers downstream cleanup, recovering from a previously dropped publish (e.g. NATS unreachable on the first attempt). At-least-once semantics; consumers must be idempotent.
+- **The purge waits; the block does not.** `abuse.purge_after` (migration 6) is when the purge may go out; NULL means due, so rows from before the column behave as they always did. Setting `exempt` or deleting the row before then cancels the automatic purge: the infohash stops blocking and is never published. It does not guard the data against web-ui's manual metadata-only enrich backfill, which purges any stoplisted hash on its own.
 - **Best-effort, not RPC-blocking.** Marshal/connect/publish errors are logged but never fail the RPC — mirrors the mailer's behaviour. `Store.PublishBanned` records a successful publish in `banned_published` (migration 5); a failed one is not recorded.
-- **Sync fans out what blocks, not only what is reported.** Each `Sync` publishes `resource.banned` for every blocking infohash missing from `banned_published` and deletes the records of infohashes that no longer block. So a ban that starts blocking without a report — `exempt` flipped back to false, a row inserted by hand, a failed publish — reaches web-ui and vault within one interval; setting `exempt` clears the record in the same pass that lifts the block, so lifting the exemption later re-publishes. The table is seeded with the stoplist as of the migration, so a restart or the first deploy does not re-publish everything. Fan-out errors are logged and never fail `Sync`.
+- **Sync fans out what blocks and is due, not only what is reported.** Each `Sync` publishes `resource.banned` for every blocking infohash missing from `banned_published` that has at least one row with `purge_after` NULL or passed (`dueInfohashes`: any row, so a later duplicate row cannot postpone a purge already due; exempt rows need no test, they unblock the infohash), and deletes the records of infohashes that no longer block. So a ban that starts blocking without a report — `exempt` flipped back to false, a row inserted by hand, a failed publish — reaches web-ui and vault within one interval of being due; setting `exempt` clears the record in the same pass that lifts the block, so lifting the exemption later re-publishes. The table is seeded with the stoplist as of the migration, so a restart or the first deploy does not re-publish everything. Fan-out errors are logged and never fail `Sync`.
+- **A rollback below migration 6 purges every pending ban at its next sync**: the old code ignores `purge_after`. So does an old replica still running during a rollout.
 
 `cs.NATS` is created from `--nats-service-host` / `--nats-service-port` (env vars `NATS_SERVICE_HOST/PORT` are auto-injected by Kubernetes from the `nats` Service in the `webtor` namespace; no chart wiring required). If the host flag is empty, `NewNATS` returns `nil` and `publishBanned` becomes a no-op — useful for local runs without NATS.
 
 ### Mailer
 
-`services/mailer.go` renders two embedded templates (`services/templates/{user,support}.go.tpl`) — `text/template`, plain-text email body, headers prepended manually in `services/smtp.go`. The user template branches on `IsIllegal` to send either a "added to stoplist" or "we'll look into it" body.
+`services/mailer.go` renders two embedded templates (`services/templates/{user,support}.go.tpl`) from a `Notice` (the report plus what became of each hash) — `text/template`, plain-text email body, headers prepended manually in `services/smtp.go`. The user template branches on `AllExempt` / `IsIllegal` to send an "under moderation", "added to stoplist" or "we'll look into it" body. The support letter says until when the automatic purge waits, that setting exempt or deleting the row before then cancels it, and that a manual metadata backfill can still remove the data meanwhile; or that it was immediate, and which hash's schedule it replaced.
 
 `services/smtp.go` handles three connection modes selected by flags:
 - `SMTP_TLS=true` → implicit TLS via `tls.Dial` (port 465 style).

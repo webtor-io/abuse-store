@@ -1,17 +1,17 @@
 Hi!
 
-{{ if .Abuse.Exempt }}
+{{ if .AllExempt }}
 Thank you for your request! It has been received and is under moderation.
 {{ else if .Abuse | IsIllegal }}
-This torrent added to stoplist and will become unavailable for users in an hour.
+The torrents listed below have been added to stoplist and will become unavailable for users in an hour.
 All connected cached content will be purged as well.
 {{ else }}
 Thank you for your request! We will do our best to solve it!
 {{ end }}
 
 Notice ID: {{ .Abuse.NoticeID }}
-Infohash:  {{ .Abuse.Infohash }}
-Filename:  {{ .Abuse.Filename }}
+{{ range .Hashes }}Infohash:  {{ .Infohash }}{{ if .Exempt }} (under moderation){{ end }}
+{{ end }}Filename:  {{ .Abuse.Filename }}
 Description:
 
 {{ .Abuse.Description | EmailQuote }}

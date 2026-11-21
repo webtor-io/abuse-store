@@ -41,6 +41,15 @@ message PushRequest {
   // abuse-store fetch it itself would close a dependency cycle). Optional — a
   // ban without it still works, it just does not cover re-uploads.
   bytes fingerprint = 11;
+  // Purge the data at once instead of after the server's --purge-delay: for
+  // bans that must not wait for review (the CSAM ban script). On a hash that
+  // is already blocked it brings a pending purge forward. The block itself is
+  // immediate either way.
+  bool purge_now = 12;
+  // More infohashes named by the same notice. Each is validated like
+  // infohash, gets its own row under the same notice_id, and the notice is
+  // mailed once listing all of them. The fingerprint applies to infohash only.
+  repeated string extra_infohashes = 13;
 }
 
 // The check request message containing the infoHash and, optionally, the

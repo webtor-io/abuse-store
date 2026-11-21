@@ -18,6 +18,7 @@ import (
 
 const (
 	storeSyncIntervalFlag = "sync-interval"
+	purgeDelayFlag        = "purge-delay"
 )
 
 var (
@@ -37,6 +38,12 @@ func RegisterStoreFlags(f []cli.Flag) []cli.Flag {
 			Value:  10,
 			EnvVar: "STORE_SYNC_INTERVAL",
 		},
+		cli.DurationFlag{
+			Name:   purgeDelayFlag,
+			Usage:  "how long a ban blocks before its data is purged (resource.banned), so a report can be set exempt or deleted first; 0 purges at Push",
+			Value:  72 * time.Hour,
+			EnvVar: "PURGE_DELAY",
+		},
 	)
 }
 
@@ -50,6 +57,8 @@ type Store struct {
 	p  *cs.PG
 	n  *cs.NATS
 	si time.Duration
+	// pd is the purge delay; <= 0 publishes resource.banned at Push.
+	pd time.Duration
 }
 
 // NewStore takes NATS for the resource.banned fan-out; nil disables it.
@@ -59,6 +68,7 @@ func NewStore(c *cli.Context, b *badger.DB, p *cs.PG, n *cs.NATS) *Store {
 		p:  p,
 		n:  n,
 		si: time.Duration(c.Int(storeSyncIntervalFlag)) * time.Minute,
+		pd: c.Duration(purgeDelayFlag),
 	}
 }
 
@@ -87,7 +97,7 @@ func (s *Store) Sync() error {
 	// The fan-out is housekeeping: its failure is logged and retried next
 	// sync, never allowed to fail Sync — the startup Sync is fatal, and the
 	// stoplist itself is already in place.
-	published, cleared, err := s.fanOut(blockingInfohashes(keep))
+	published, cleared, err := s.fanOut(blockingInfohashes(keep), dueInfohashes(rows, time.Now()))
 	if err != nil {
 		log.WithError(err).Error("failed to fan out bans")
 	}
@@ -140,6 +150,23 @@ func (s *Store) load(rows []*m.Abuse) (keep map[string]struct{}, synced, failed,
 	return keep, synced, failed, len(ex)
 }
 
+// dueInfohashes returns the infohashes whose data purge is due: at least one
+// row has no purge_after (rows from before the delay) or one that has passed.
+// Any row, not every row: the first notice whose window ran out without a
+// review is the binding one, and a later row for the same hash — Push does
+// not insert one, but a race between replicas or a hand insert can — must not
+// postpone a purge that is already due. Exempt rows need no test here: fanOut
+// publishes only what also blocks, and an exempt row unblocks its infohash.
+func dueInfohashes(rows []*m.Abuse, now time.Time) map[string]struct{} {
+	d := map[string]struct{}{}
+	for _, a := range rows {
+		if !a.PurgeAfter.After(now) {
+			d[a.Infohash] = struct{}{}
+		}
+	}
+	return d
+}
+
 // blockingInfohashes picks the infohash keys out of a load's keep set: what
 // blocks by infohash right now, and so what web-ui and vault must have purged.
 func blockingInfohashes(keep map[string]struct{}) map[string]struct{} {
@@ -171,12 +198,35 @@ func (s *Store) PublishBanned(h string) {
 	}
 }
 
-// fanOut publishes resource.banned for every infohash that blocks but was
-// never published, and forgets every recorded one that no longer blocks, so a
-// ban that comes back — an exemption lifted, a deleted row re-added, a row
-// inserted by hand — reaches web-ui and vault like a fresh report. Without
-// NATS nothing is published or recorded.
-func (s *Store) fanOut(blocking map[string]struct{}) (published, cleared int, err error) {
+// PurgeNow brings any pending purge of h forward to now and publishes it, and
+// reports whether a pending purge was brought forward. Moving purge_after
+// first makes a failed publish one that Sync retries at its next pass instead
+// of after the delay.
+func (s *Store) PurgeNow(h string) (advanced bool) {
+	if h == "" {
+		return false
+	}
+	if pg := s.p.Get(); pg != nil {
+		now := time.Now()
+		r, err := pg.Exec(`UPDATE abuse SET purge_after = ? WHERE infohash = ? AND purge_after > ?`, now, h, now)
+		if err != nil {
+			log.WithError(err).WithField("infohash", h).Error("failed to bring purge forward")
+		} else {
+			advanced = r.RowsAffected() > 0
+		}
+	}
+	s.PublishBanned(h)
+	return advanced
+}
+
+// fanOut publishes resource.banned for every infohash that blocks and is due
+// but was never published, and forgets every recorded one that no longer
+// blocks, so a ban that comes back — an exemption lifted, a deleted row
+// re-added, a row inserted by hand — reaches web-ui and vault like a fresh
+// report. One still inside its purge delay is left for a later sync; if it is
+// set exempt or deleted meanwhile it stops blocking and is never published.
+// Without NATS nothing is published or recorded.
+func (s *Store) fanOut(blocking, due map[string]struct{}) (published, cleared int, err error) {
 	if s.n == nil {
 		return 0, 0, nil
 	}
@@ -201,6 +251,9 @@ func (s *Store) fanOut(blocking map[string]struct{}) (published, cleared int, er
 	}
 	for h := range blocking {
 		if _, ok := recorded[h]; ok {
+			continue
+		}
+		if _, ok := due[h]; !ok {
 			continue
 		}
 		if !s.publish(h) {

@@ -31,6 +31,9 @@ type Abuse struct {
 	// Exempt marks a reviewed infohash that must never block: the row and
 	// every other row for the same infohash stay out of the stoplist, and a
 	// repeat report is mailed but not stored (migrations/4_abuse_exempt).
-	Exempt    bool      `pg:"exempt,use_zero"`
-	CreatedAt time.Time `pg:",default:now()"`
+	Exempt bool `pg:"exempt,use_zero"`
+	// PurgeAfter is when Sync may fan the ban out as resource.banned. Zero
+	// (NULL) means due: rows from before the column (migrations/6).
+	PurgeAfter time.Time `pg:"purge_after"`
+	CreatedAt  time.Time `pg:",default:now()"`
 }
