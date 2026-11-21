@@ -6,7 +6,7 @@ It does three things behind a single gRPC API:
 
 - **Stoplist for illegal content.** Reports with `cause = ILLEGAL_CONTENT` are persisted, and other services (`web-ui`, `torrent-http-proxy`) call `Check(infohash)` before serving content to block playback of reported torrents.
 - **Mail relay.** Every accepted notice (illegal content, malware, app error, generic question) generates a support email and, when the reporter provided a return address, an acknowledgement.
-- **Cleanup fan-out via NATS.** On every `ILLEGAL_CONTENT` report (new *and* duplicate) it publishes `resource.banned` so `web-ui` and `vault` can purge data tied to the banned infohash.
+- **Cleanup fan-out via NATS.** Once an `ILLEGAL_CONTENT` ban's purge delay (`--purge-delay`, default 72h) has passed, it publishes `resource.banned` so `web-ui` and `vault` purge data tied to the banned infohash. The block itself is immediate; the delay leaves time to review a report before data is irreversibly deleted.
 
 ## Architecture
 
@@ -25,12 +25,12 @@ gRPC client ──► Push / Check  ─┬─► PostgreSQL  (source of truth, p
 
 Defined in [`proto/abuse-store.proto`](proto/abuse-store.proto):
 
-- `Push(PushRequest) → PushReply` — submit an abuse notice. `infohash` and `email` are validated; `notice_id` and `started_at` default to a fresh UUID and the current time. Only `ILLEGAL_CONTENT` causes a database write; duplicates by infohash are rejected with `ALREADY_EXISTS` but **still publish `resource.banned`** (recovery for a dropped first publish). A report for an infohash marked `exempt` in the table is mailed as usual (the reporter is told it is under moderation, support sees it marked `[exempt]`) and succeeds, but is neither stored nor fanned out.
+- `Push(PushRequest) → PushReply` — submit an abuse notice naming `infohash` and, optionally, more `extra_infohashes`. Each hash must be a full 40-character hex infohash (case and surrounding whitespace are normalized), repeats are dropped, `email` is validated; `notice_id` and `started_at` default to a fresh UUID and the current time. Only `ILLEGAL_CONTENT` causes a database write: one row per hash not yet blocked, under the same `notice_id`, purged after `--purge-delay` — or at once with `purge_now = true`, which also brings forward a pending purge of an already-blocked hash. A notice whose every hash is already blocked is rejected with `ALREADY_EXISTS` and mailed to no one; a repeat report without `purge_now` publishes nothing. A hash marked `exempt` in the table is mailed as usual (the reporter is told it is under moderation, support sees it marked `[exempt]`) but is neither stored nor fanned out. One letter goes to support and at most one to the reporter per notice, listing every hash.
 - `Check(CheckRequest) → CheckReply` — returns `exists = true` if the infohash is in the stoplist (Badger lookup). Deleting a row or setting `exempt = true` lifts the block at the next sync.
 
 ## NATS events
 
-`ILLEGAL_CONTENT` reports publish to subject **`resource.banned`** with body:
+`ILLEGAL_CONTENT` bans publish to subject **`resource.banned`**, once their purge is due, with body:
 
 ```json
 { "infohash": "<lowercase hex>" }
@@ -41,7 +41,7 @@ The platform's JetStream stream `common` captures `resource.*`, so any consumer 
 - `web-ui` — drops the resource from `library`, `watch_history`, `cache_index`, `torrent_resource`, media metadata and the `vault.pledge` / `vault.tx_log` / `vault.resource` tables (refunding VP).
 - `vault` — queues the resource for deletion (S3 + own DB) via `ResourceQueueForDeletion`.
 
-Publishing is best-effort and never fails the RPC. Consumers must be idempotent — duplicate reports re-fire the event by design. Each periodic sync also publishes every blocking infohash not yet recorded in `banned_published` and forgets the ones that stopped blocking, so a failed publish, a row inserted by hand, or an exemption lifted (`exempt` back to false) is fanned out within one `--sync-interval`.
+Publishing is best-effort and never fails the RPC. Consumers must be idempotent — a `purge_now` repeat re-fires the event. Each periodic sync publishes every blocking infohash that is due (a row with `purge_after` NULL or passed) and not yet recorded in `banned_published`, and forgets the ones that stopped blocking, so a delayed ban, a failed publish, a row inserted by hand, or an exemption lifted (`exempt` back to false) is fanned out within one `--sync-interval` of being due. Setting `exempt` or deleting the row before `purge_after` keeps the data.
 
 ## Build & run
 
@@ -69,6 +69,7 @@ make protoc                              # regenerate proto/*.pb.go
 --nats-service-host                nats host (auto-injected in K8s)          [$NATS_SERVICE_HOST]
 --nats-service-port    (4222)      nats port                                 [$NATS_SERVICE_PORT]
 --sync-interval, --si  (10)        PG → Badger resync interval, minutes      [$STORE_SYNC_INTERVAL]
+--purge-delay          (72h)       ban → resource.banned delay; 0 = at Push  [$PURGE_DELAY]
 --smtp-host                                                                  [$SMTP_HOST]
 --smtp-port                                                                  [$SMTP_PORT]
 --smtp-user                                                                  [$SMTP_USER]
@@ -89,6 +90,8 @@ The `client/` directory contains a small `urfave/cli` tool for smoke-testing:
 ```bash
 go run ./client --host 127.0.0.1 --port 50051 push \
     --hash <infohash> --work "..." --email reporter@example.com --description "..."
+# also: --extra-hash <infohash> (repeatable), --purge-now, --source form|mail (default form),
+#       --subject, --started-at (RFC 3339 or unix seconds), --notice-id, --fingerprint
 
 go run ./client --host 127.0.0.1 --port 50051 check --hash <infohash>
 ```

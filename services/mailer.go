@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"github.com/pkg/errors"
 	log "github.com/sirupsen/logrus"
+	"slices"
 	"strings"
 	"text/template"
 
@@ -43,6 +44,7 @@ var (
 	}).Parse(userTemplateSrc))
 	supportTemplate = template.Must(template.New("support").Funcs(template.FuncMap{
 		"CauseName": causeName,
+		"IsIllegal": isIllegal,
 	}).Parse(supportTemplateSrc))
 )
 
@@ -74,8 +76,38 @@ type Mailer struct {
 	smtp    *SMTP
 }
 
+// Notice is one Push as the letters tell it: the report, and what became of
+// each infohash it named.
+type Notice struct {
+	// Abuse carries the report's fields; its Infohash is the primary one.
+	Abuse  *m.Abuse
+	Hashes []NoticeHash
+	// PurgeNow: the data purge went out with the notice. Otherwise it is
+	// scheduled for Abuse.PurgeAfter.
+	PurgeNow bool
+}
+
+type NoticeHash struct {
+	Infohash string
+	Exempt   bool // reviewed and exempt: not stored, never purged
+	Existed  bool // already in the stoplist before this notice
+}
+
+func (n *Notice) AnyExempt() bool {
+	return slices.ContainsFunc(n.Hashes, func(h NoticeHash) bool { return h.Exempt })
+}
+
+func (n *Notice) AllExempt() bool {
+	return !slices.ContainsFunc(n.Hashes, func(h NoticeHash) bool { return !h.Exempt })
+}
+
+// Added reports whether the notice put a new row in, i.e. scheduled a purge.
+func (n *Notice) Added() bool {
+	return slices.ContainsFunc(n.Hashes, func(h NoticeHash) bool { return !h.Exempt && !h.Existed })
+}
+
 type View struct {
-	Abuse   *m.Abuse
+	*Notice
 	Support string
 }
 
@@ -87,10 +119,10 @@ func NewMailer(c *cli.Context, smtp *SMTP) *Mailer {
 	}
 }
 
-func (s *Mailer) render(a *m.Abuse, t *template.Template) (string, error) {
+func (s *Mailer) render(n *Notice, t *template.Template) (string, error) {
 	var b bytes.Buffer
 	v := &View{
-		Abuse:   a,
+		Notice:  n,
 		Support: s.support,
 	}
 	err := t.Execute(&b, v)
@@ -100,8 +132,9 @@ func (s *Mailer) render(a *m.Abuse, t *template.Template) (string, error) {
 	return b.String(), nil
 }
 
-func (s *Mailer) SendUserEmail(a *m.Abuse) error {
-	body, err := s.render(a, userTemplate)
+func (s *Mailer) SendUserEmail(n *Notice) error {
+	a := n.Abuse
+	body, err := s.render(n, userTemplate)
 	if err != nil {
 		return err
 	}
@@ -116,14 +149,15 @@ func (s *Mailer) SendUserEmail(a *m.Abuse) error {
 	return nil
 }
 
-func (s *Mailer) SendSupportEmail(a *m.Abuse) error {
-	body, err := s.render(a, supportTemplate)
+func (s *Mailer) SendSupportEmail(n *Notice) error {
+	a := n.Abuse
+	body, err := s.render(n, supportTemplate)
 	if err != nil {
 		return err
 	}
 
 	subject := fmt.Sprintf("[%s] %s", a.NoticeID, a.Subject)
-	if a.Exempt {
+	if n.AnyExempt() {
 		subject = "[exempt] " + subject
 	}
 	err = s.smtp.Send(s.sender, s.support, a.Email, subject, body)

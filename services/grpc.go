@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net"
 	"regexp"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -109,10 +110,11 @@ func (s *GRPC) Push(ctx context.Context, in *pb.PushRequest) (*pb.PushReply, err
 	if noticeID == "" {
 		noticeID = fmt.Sprintf("%s", uuid.NewV4())
 	}
-	infohash := normalizeInfohash(in.GetInfohash())
-	if infohash != "" && !infohashRe.MatchString(infohash) {
-		return nil, status.Error(codes.InvalidArgument, "wrong infohash")
+	hashes, err := noticeInfohashes(in.GetInfohash(), in.GetExtraInfohashes())
+	if err != nil {
+		return nil, status.Error(codes.InvalidArgument, err.Error())
 	}
+	infohash := hashes[0]
 
 	// A ban has to name what it bans. Without either arm the row is dead
 	// weight: no infohash to key the stoplist on, no fingerprint to catch
@@ -148,59 +150,114 @@ func (s *GRPC) Push(ctx context.Context, in *pb.PushRequest) (*pb.PushReply, err
 		Cause:       int(in.GetCause()),
 		Source:      int(in.GetSource()),
 	}
-	if in.GetCause() == pb.PushRequest_ILLEGAL_CONTENT {
+	n := &Notice{Abuse: a}
+	if in.GetCause() != pb.PushRequest_ILLEGAL_CONTENT {
+		for _, h := range hashes {
+			n.Hashes = append(n.Hashes, NoticeHash{Infohash: h})
+		}
+		s.notify(n)
+		return &pb.PushReply{}, nil
+	}
+	// The block is immediate; the purge waits out the delay unless the caller
+	// or the server (delay 0) says otherwise. Sync publishes once it is due.
+	n.PurgeNow = in.GetPurgeNow() || s.store.pd <= 0
+	a.PurgeAfter = time.Now()
+	if !n.PurgeNow {
+		a.PurgeAfter = a.PurgeAfter.Add(s.store.pd)
+	}
+	existed := 0
+	for i, h := range hashes {
+		nh := NoticeHash{Infohash: h}
 		// A reviewed, exempt infohash is not banned again: no row, no
 		// resource.banned purge. To the reporter it looks like any accepted
-		// report (success here, "under moderation" in the letter); support
-		// gets the letter marked exempt, so every repeat request is seen.
-		exempt, err := s.store.IsExempt(infohash)
+		// report ("under moderation" in the letter); support gets the letter
+		// marked exempt, so every repeat request is seen.
+		nh.Exempt, err = s.store.IsExempt(h)
 		if err != nil {
 			return nil, errors.Wrap(err, "failed to check exemption")
 		}
-		if exempt {
-			a.Exempt = true
-			s.notify(a)
-			log.WithField("infohash", infohash).Info("report for exempt infohash not added to stoplist")
-			return &pb.PushReply{}, nil
+		if nh.Exempt {
+			log.WithField("infohash", h).Info("report for exempt infohash not added to stoplist")
+			n.Hashes = append(n.Hashes, nh)
+			continue
 		}
 		// Deduplicate on the REPORT, not on the payload: the fingerprints are
 		// deliberately not passed here. A newly reported infohash whose payload
 		// is already blocked still deserves its own abuse row, otherwise the
 		// audit trail loses the fact that it was reported at all.
-		r, err := s.Check(ctx, &pb.CheckRequest{Infohash: infohash})
+		r, err := s.Check(ctx, &pb.CheckRequest{Infohash: h})
 		if err != nil {
 			return nil, err
 		}
-		if !r.Exists {
-			err = s.store.Push(a)
-			if err != nil {
+		nh.Existed = r.Exists
+		if nh.Existed {
+			existed++
+		} else {
+			row := *a
+			row.Infohash = h
+			if i > 0 {
+				// The fingerprint is the primary torrent's payload, not the
+				// extras'.
+				row.Fingerprint = nil
+			}
+			if err := s.store.Push(&row); err != nil {
 				return nil, err
 			}
 		}
-		// Always publish on ILLEGAL_CONTENT — a duplicate report re-triggers
-		// downstream cleanup, recovering from a previously dropped publish.
-		// Consumers must be idempotent.
-		s.store.PublishBanned(infohash)
-		if r.Exists {
-			return nil, status.Errorf(codes.AlreadyExists, "abuse notice with infoHash=%v already exists", infohash)
+		n.Hashes = append(n.Hashes, nh)
+	}
+	// A duplicate does not re-publish on its own: a delayed row must not be
+	// purged early by a repeat report, and a dropped publish is retried by
+	// Sync. Only an immediate purge publishes here, duplicates included, and
+	// it brings their pending purge forward. Consumers must be idempotent.
+	if n.PurgeNow {
+		for _, nh := range n.Hashes {
+			if !nh.Exempt {
+				s.store.PurgeNow(nh.Infohash)
+			}
 		}
 	}
-	s.notify(a)
+	if existed == len(hashes) {
+		return nil, status.Errorf(codes.AlreadyExists, "abuse notice with infoHash=%v already exists", strings.Join(hashes, ","))
+	}
+	s.notify(n)
 	return &pb.PushReply{}, nil
 }
 
-// notify mails the reporter (when they left an address) and support. Best
-// effort: failures are logged and never fail the RPC.
-func (s *GRPC) notify(a *m.Abuse) {
-	if a.Email != "" {
+// noticeInfohashes normalizes and validates the primary infohash and the
+// extras, and drops repeats. The primary stays first, and may be empty (a
+// fingerprint-only ban); an extra may not.
+func noticeInfohashes(primary string, extras []string) ([]string, error) {
+	primary = normalizeInfohash(primary)
+	if primary != "" && !infohashRe.MatchString(primary) {
+		return nil, errors.New("wrong infohash")
+	}
+	hashes := []string{primary}
+	for _, h := range extras {
+		h = normalizeInfohash(h)
+		if !infohashRe.MatchString(h) {
+			return nil, errors.Errorf("wrong extra infohash %q", h)
+		}
+		if !slices.Contains(hashes, h) {
+			hashes = append(hashes, h)
+		}
+	}
+	return hashes, nil
+}
+
+// notify mails the reporter (when they left an address) and support, once
+// per notice whatever the number of infohashes. Best effort: failures are
+// logged and never fail the RPC.
+func (s *GRPC) notify(n *Notice) {
+	if n.Abuse.Email != "" {
 		go func() {
-			if err := s.mailer.SendUserEmail(a); err != nil {
+			if err := s.mailer.SendUserEmail(n); err != nil {
 				log.WithError(err).Error("failed to send user email")
 			}
 		}()
 	}
 	go func() {
-		if err := s.mailer.SendSupportEmail(a); err != nil {
+		if err := s.mailer.SendSupportEmail(n); err != nil {
 			log.WithError(err).Error("failed to send support email")
 		}
 	}()

@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"fmt"
 	"os"
+	"strconv"
 	"strings"
 	"time"
 
@@ -15,6 +16,14 @@ import (
 )
 
 func main() {
+	err := newApp().Run(os.Args)
+	if err != nil {
+		fmt.Println(err)
+		os.Exit(1)
+	}
+}
+
+func newApp() *cli.App {
 	app := cli.NewApp()
 	app.Name = "abuse-store-cli"
 	app.Usage = "interacts with abuse store"
@@ -72,11 +81,24 @@ func main() {
 				},
 				cli.StringFlag{
 					Name:  "started-at, st",
-					Usage: "Start time of abusive activity (current time by default)",
+					Usage: "Start time of abusive activity, RFC 3339 or unix seconds (current time by default)",
 				},
 				cli.StringFlag{
 					Name:  "subject, subj",
-					Usage: "Subject (empty by default)",
+					Usage: "Subject (\"Abuse notice <id>\" by default)",
+				},
+				cli.StringSliceFlag{
+					Name:  "extra-hash",
+					Usage: "Another infohash named by the same notice; repeat for more",
+				},
+				cli.BoolFlag{
+					Name:  "purge-now",
+					Usage: "Purge the data at once instead of after the server's purge delay",
+				},
+				cli.StringFlag{
+					Name:  "source",
+					Usage: "Where the notice came from: form or mail",
+					Value: "form",
 				},
 			},
 			Action: func(c *cli.Context) error {
@@ -101,16 +123,34 @@ func main() {
 					}
 					fp = d
 				}
+				source, ok := pb.PushRequest_Source_value[strings.ToUpper(c.String("source"))]
+				if !ok {
+					return fmt.Errorf("source %q is not form or mail", c.String("source"))
+				}
+				var startedAt int64
+				if v := strings.TrimSpace(c.String("started-at")); v != "" {
+					if startedAt, err = strconv.ParseInt(v, 10, 64); err != nil {
+						t, perr := time.Parse(time.RFC3339, v)
+						if perr != nil {
+							return fmt.Errorf("started-at %q is neither RFC 3339 nor unix seconds", v)
+						}
+						startedAt = t.Unix()
+					}
+				}
 				_, err = cl.Push(ctx, &pb.PushRequest{
-					Fingerprint: fp,
-					Work:        c.String("work"),
-					Filename:    c.String("filename"),
-					Infohash:    c.String("infohash"),
-					Email:       c.String("email"),
-					Description: c.String("description"),
-					NoticeId:    c.String("notice-id"),
-					Source:      pb.PushRequest_FORM,
-					Cause:       pb.PushRequest_ILLEGAL_CONTENT,
+					Fingerprint:     fp,
+					Work:            c.String("work"),
+					Filename:        c.String("filename"),
+					Infohash:        c.String("infohash"),
+					ExtraInfohashes: c.StringSlice("extra-hash"),
+					Email:           c.String("email"),
+					Description:     c.String("description"),
+					NoticeId:        c.String("notice-id"),
+					Subject:         c.String("subject"),
+					StartedAt:       startedAt,
+					PurgeNow:        c.Bool("purge-now"),
+					Source:          pb.PushRequest_Source(source),
+					Cause:           pb.PushRequest_ILLEGAL_CONTENT,
 				})
 				if err != nil {
 					return err
@@ -166,9 +206,5 @@ func main() {
 			},
 		},
 	}
-	err := app.Run(os.Args)
-	if err != nil {
-		fmt.Println(err)
-		os.Exit(1)
-	}
+	return app
 }
