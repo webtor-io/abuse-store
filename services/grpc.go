@@ -200,7 +200,11 @@ func (s *GRPC) Push(ctx context.Context, in *pb.PushRequest) (*pb.PushReply, err
 				// extras'.
 				row.Fingerprint = nil
 			}
-			if err := s.store.Push(&row); err != nil {
+			if err := s.store.Push(&row); errors.Is(err, ErrExempt) {
+				// Exempted since the check above.
+				log.WithField("infohash", h).Info("report for exempt infohash not added to stoplist")
+				nh.Exempt = true
+			} else if err != nil {
 				return nil, err
 			}
 		}

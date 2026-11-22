@@ -2,11 +2,13 @@ package services
 
 import (
 	"context"
+	"errors"
 	"slices"
 	"strings"
 	"testing"
 	"time"
 
+	m "github.com/webtor-io/abuse-store/models"
 	pb "github.com/webtor-io/abuse-store/proto"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
@@ -267,5 +269,26 @@ func TestPGExemptGivesUpAtTheDeadline(t *testing.T) {
 	}
 	if !blocked(t, e.s, hashA, nil) {
 		t.Fatal("unblocked by an Exempt that gave up")
+	}
+}
+
+// Store.Push asks again under its lock. Here it gets the row a Push makes
+// once its earlier IsExempt read came before Exempt's commit: no row, and
+// the block Exempt lifted is not put back.
+func TestPGStorePushRechecksTheExemption(t *testing.T) {
+	e := newPGEnv(t, "72h")
+	e.push(t, &pb.PushRequest{Infohash: hashA})
+	if rows, c := e.exempt(t, hashA); c != codes.OK || rows != 1 {
+		t.Fatalf("exempt: rows %d, %v; want 1, OK", rows, c)
+	}
+	err := e.s.Push(&m.Abuse{Infohash: hashA, PurgeAfter: time.Now().Add(72 * time.Hour)})
+	if !errors.Is(err, ErrExempt) {
+		t.Fatalf("push after Exempt: %v, want ErrExempt", err)
+	}
+	if blocked(t, e.s, hashA, nil) {
+		t.Fatal("blocked again by a push that raced Exempt")
+	}
+	if n := e.count(t, `SELECT count(*) FROM abuse WHERE infohash = ?`, hashA); n != 1 {
+		t.Fatalf("%d rows, want 1", n)
 	}
 }

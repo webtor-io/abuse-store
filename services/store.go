@@ -26,6 +26,9 @@ var (
 	ErrNotFound = errors.New("store: abuse not found")
 	// ErrPurgeDue is Exempt refusing an infohash outside its review window.
 	ErrPurgeDue = errors.New("store: purge due, not in the review window")
+	// ErrExempt is Push refusing a row for an infohash exempted since the
+	// caller last asked.
+	ErrExempt = errors.New("store: infohash exempt")
 )
 
 // fingerprintSize is the length of a SHA-256 digest. Values of any other
@@ -451,6 +454,14 @@ func (s *Store) Push(a *m.Abuse) error {
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	// Asked again under mu, where Exempt reloads the cache after its commit:
+	// a caller whose IsExempt read came before that commit would otherwise
+	// cache the infohash again, blocking it until the next sync.
+	if ex, err := s.IsExempt(a.Infohash); err != nil {
+		return errors.Wrap(err, "failed to check exemption")
+	} else if ex {
+		return ErrExempt
+	}
 	pg := s.p.Get()
 	_, err := pg.Model(a).Insert()
 	if err != nil {
