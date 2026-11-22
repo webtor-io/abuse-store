@@ -21,6 +21,61 @@ const (
 	_ = protoimpl.EnforceVersion(protoimpl.MaxVersion - 20)
 )
 
+type ConfirmReply_Status int32
+
+const (
+	// No such token (also: dropped after its expiry by the next sync).
+	ConfirmReply_UNKNOWN   ConfirmReply_Status = 0
+	ConfirmReply_CONFIRMED ConfirmReply_Status = 1
+	// This token already confirmed its notice; nothing was done again.
+	ConfirmReply_ALREADY_CONFIRMED ConfirmReply_Status = 2
+	// The notice was not confirmed in time; nothing was stored.
+	ConfirmReply_EXPIRED ConfirmReply_Status = 3
+)
+
+// Enum value maps for ConfirmReply_Status.
+var (
+	ConfirmReply_Status_name = map[int32]string{
+		0: "UNKNOWN",
+		1: "CONFIRMED",
+		2: "ALREADY_CONFIRMED",
+		3: "EXPIRED",
+	}
+	ConfirmReply_Status_value = map[string]int32{
+		"UNKNOWN":           0,
+		"CONFIRMED":         1,
+		"ALREADY_CONFIRMED": 2,
+		"EXPIRED":           3,
+	}
+)
+
+func (x ConfirmReply_Status) Enum() *ConfirmReply_Status {
+	p := new(ConfirmReply_Status)
+	*p = x
+	return p
+}
+
+func (x ConfirmReply_Status) String() string {
+	return protoimpl.X.EnumStringOf(x.Descriptor(), protoreflect.EnumNumber(x))
+}
+
+func (ConfirmReply_Status) Descriptor() protoreflect.EnumDescriptor {
+	return file_proto_abuse_store_proto_enumTypes[0].Descriptor()
+}
+
+func (ConfirmReply_Status) Type() protoreflect.EnumType {
+	return &file_proto_abuse_store_proto_enumTypes[0]
+}
+
+func (x ConfirmReply_Status) Number() protoreflect.EnumNumber {
+	return protoreflect.EnumNumber(x)
+}
+
+// Deprecated: Use ConfirmReply_Status.Descriptor instead.
+func (ConfirmReply_Status) EnumDescriptor() ([]byte, []int) {
+	return file_proto_abuse_store_proto_rawDescGZIP(), []int{1, 0}
+}
+
 type PushRequest_Cause int32
 
 const (
@@ -28,6 +83,11 @@ const (
 	PushRequest_MALWARE         PushRequest_Cause = 1
 	PushRequest_APP_ERROR       PushRequest_Cause = 2
 	PushRequest_QUESTION        PushRequest_Cause = 3
+	// Mailed to support only, prefixed [CSAM report]: never stored, never
+	// banned, no letter to the reporter, whatever the port or source.
+	PushRequest_CSAM_REPORT PushRequest_Cause = 4
+	// Banned like ILLEGAL_CONTENT.
+	PushRequest_INTIMATE_IMAGE PushRequest_Cause = 5
 )
 
 // Enum value maps for PushRequest_Cause.
@@ -37,12 +97,16 @@ var (
 		1: "MALWARE",
 		2: "APP_ERROR",
 		3: "QUESTION",
+		4: "CSAM_REPORT",
+		5: "INTIMATE_IMAGE",
 	}
 	PushRequest_Cause_value = map[string]int32{
 		"ILLEGAL_CONTENT": 0,
 		"MALWARE":         1,
 		"APP_ERROR":       2,
 		"QUESTION":        3,
+		"CSAM_REPORT":     4,
+		"INTIMATE_IMAGE":  5,
 	}
 )
 
@@ -57,11 +121,11 @@ func (x PushRequest_Cause) String() string {
 }
 
 func (PushRequest_Cause) Descriptor() protoreflect.EnumDescriptor {
-	return file_proto_abuse_store_proto_enumTypes[0].Descriptor()
+	return file_proto_abuse_store_proto_enumTypes[1].Descriptor()
 }
 
 func (PushRequest_Cause) Type() protoreflect.EnumType {
-	return &file_proto_abuse_store_proto_enumTypes[0]
+	return &file_proto_abuse_store_proto_enumTypes[1]
 }
 
 func (x PushRequest_Cause) Number() protoreflect.EnumNumber {
@@ -70,7 +134,7 @@ func (x PushRequest_Cause) Number() protoreflect.EnumNumber {
 
 // Deprecated: Use PushRequest_Cause.Descriptor instead.
 func (PushRequest_Cause) EnumDescriptor() ([]byte, []int) {
-	return file_proto_abuse_store_proto_rawDescGZIP(), []int{3, 0}
+	return file_proto_abuse_store_proto_rawDescGZIP(), []int{5, 0}
 }
 
 type PushRequest_Source int32
@@ -103,11 +167,11 @@ func (x PushRequest_Source) String() string {
 }
 
 func (PushRequest_Source) Descriptor() protoreflect.EnumDescriptor {
-	return file_proto_abuse_store_proto_enumTypes[1].Descriptor()
+	return file_proto_abuse_store_proto_enumTypes[2].Descriptor()
 }
 
 func (PushRequest_Source) Type() protoreflect.EnumType {
-	return &file_proto_abuse_store_proto_enumTypes[1]
+	return &file_proto_abuse_store_proto_enumTypes[2]
 }
 
 func (x PushRequest_Source) Number() protoreflect.EnumNumber {
@@ -116,7 +180,105 @@ func (x PushRequest_Source) Number() protoreflect.EnumNumber {
 
 // Deprecated: Use PushRequest_Source.Descriptor instead.
 func (PushRequest_Source) EnumDescriptor() ([]byte, []int) {
-	return file_proto_abuse_store_proto_rawDescGZIP(), []int{3, 1}
+	return file_proto_abuse_store_proto_rawDescGZIP(), []int{5, 1}
+}
+
+type ConfirmRequest struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// The t parameter of the confirmation link, as mailed.
+	Token         string `protobuf:"bytes,1,opt,name=token,proto3" json:"token,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *ConfirmRequest) Reset() {
+	*x = ConfirmRequest{}
+	mi := &file_proto_abuse_store_proto_msgTypes[0]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *ConfirmRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ConfirmRequest) ProtoMessage() {}
+
+func (x *ConfirmRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_proto_abuse_store_proto_msgTypes[0]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ConfirmRequest.ProtoReflect.Descriptor instead.
+func (*ConfirmRequest) Descriptor() ([]byte, []int) {
+	return file_proto_abuse_store_proto_rawDescGZIP(), []int{0}
+}
+
+func (x *ConfirmRequest) GetToken() string {
+	if x != nil {
+		return x.Token
+	}
+	return ""
+}
+
+type ConfirmReply struct {
+	state  protoimpl.MessageState `protogen:"open.v1"`
+	Status ConfirmReply_Status    `protobuf:"varint,1,opt,name=status,proto3,enum=ConfirmReply_Status" json:"status,omitempty"`
+	// How many infohashes the confirmed notice named (CONFIRMED only).
+	Hashes        int32 `protobuf:"varint,2,opt,name=hashes,proto3" json:"hashes,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *ConfirmReply) Reset() {
+	*x = ConfirmReply{}
+	mi := &file_proto_abuse_store_proto_msgTypes[1]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *ConfirmReply) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ConfirmReply) ProtoMessage() {}
+
+func (x *ConfirmReply) ProtoReflect() protoreflect.Message {
+	mi := &file_proto_abuse_store_proto_msgTypes[1]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ConfirmReply.ProtoReflect.Descriptor instead.
+func (*ConfirmReply) Descriptor() ([]byte, []int) {
+	return file_proto_abuse_store_proto_rawDescGZIP(), []int{1}
+}
+
+func (x *ConfirmReply) GetStatus() ConfirmReply_Status {
+	if x != nil {
+		return x.Status
+	}
+	return ConfirmReply_UNKNOWN
+}
+
+func (x *ConfirmReply) GetHashes() int32 {
+	if x != nil {
+		return x.Hashes
+	}
+	return 0
 }
 
 type ExemptRequest struct {
@@ -130,7 +292,7 @@ type ExemptRequest struct {
 
 func (x *ExemptRequest) Reset() {
 	*x = ExemptRequest{}
-	mi := &file_proto_abuse_store_proto_msgTypes[0]
+	mi := &file_proto_abuse_store_proto_msgTypes[2]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -142,7 +304,7 @@ func (x *ExemptRequest) String() string {
 func (*ExemptRequest) ProtoMessage() {}
 
 func (x *ExemptRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_abuse_store_proto_msgTypes[0]
+	mi := &file_proto_abuse_store_proto_msgTypes[2]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -155,7 +317,7 @@ func (x *ExemptRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ExemptRequest.ProtoReflect.Descriptor instead.
 func (*ExemptRequest) Descriptor() ([]byte, []int) {
-	return file_proto_abuse_store_proto_rawDescGZIP(), []int{0}
+	return file_proto_abuse_store_proto_rawDescGZIP(), []int{2}
 }
 
 func (x *ExemptRequest) GetInfohash() string {
@@ -182,7 +344,7 @@ type ExemptReply struct {
 
 func (x *ExemptReply) Reset() {
 	*x = ExemptReply{}
-	mi := &file_proto_abuse_store_proto_msgTypes[1]
+	mi := &file_proto_abuse_store_proto_msgTypes[3]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -194,7 +356,7 @@ func (x *ExemptReply) String() string {
 func (*ExemptReply) ProtoMessage() {}
 
 func (x *ExemptReply) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_abuse_store_proto_msgTypes[1]
+	mi := &file_proto_abuse_store_proto_msgTypes[3]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -207,7 +369,7 @@ func (x *ExemptReply) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ExemptReply.ProtoReflect.Descriptor instead.
 func (*ExemptReply) Descriptor() ([]byte, []int) {
-	return file_proto_abuse_store_proto_rawDescGZIP(), []int{1}
+	return file_proto_abuse_store_proto_rawDescGZIP(), []int{3}
 }
 
 func (x *ExemptReply) GetRows() int32 {
@@ -219,14 +381,17 @@ func (x *ExemptReply) GetRows() int32 {
 
 // The push response message containing
 type PushReply struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// The notice is held until the reporter confirms it through the link just
+	// mailed to them (--form-confirm); nothing is blocked yet.
+	ConfirmationSent bool `protobuf:"varint,1,opt,name=confirmation_sent,json=confirmationSent,proto3" json:"confirmation_sent,omitempty"`
+	unknownFields    protoimpl.UnknownFields
+	sizeCache        protoimpl.SizeCache
 }
 
 func (x *PushReply) Reset() {
 	*x = PushReply{}
-	mi := &file_proto_abuse_store_proto_msgTypes[2]
+	mi := &file_proto_abuse_store_proto_msgTypes[4]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -238,7 +403,7 @@ func (x *PushReply) String() string {
 func (*PushReply) ProtoMessage() {}
 
 func (x *PushReply) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_abuse_store_proto_msgTypes[2]
+	mi := &file_proto_abuse_store_proto_msgTypes[4]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -251,7 +416,14 @@ func (x *PushReply) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use PushReply.ProtoReflect.Descriptor instead.
 func (*PushReply) Descriptor() ([]byte, []int) {
-	return file_proto_abuse_store_proto_rawDescGZIP(), []int{2}
+	return file_proto_abuse_store_proto_rawDescGZIP(), []int{4}
+}
+
+func (x *PushReply) GetConfirmationSent() bool {
+	if x != nil {
+		return x.ConfirmationSent
+	}
+	return false
 }
 
 // The push request message
@@ -282,13 +454,21 @@ type PushRequest struct {
 	// infohash, gets its own row under the same notice_id, and the notice is
 	// mailed once listing all of them. The fingerprint applies to infohash only.
 	ExtraInfohashes []string `protobuf:"bytes,13,rep,name=extra_infohashes,json=extraInfohashes,proto3" json:"extra_infohashes,omitempty"`
-	unknownFields   protoimpl.UnknownFields
-	sizeCache       protoimpl.SizeCache
+	// The reporter's name and their two statements of a takedown notice: the
+	// use is not authorized (good faith), and they are the owner or authorized
+	// to act for them. Stored on the rows for audit and shown to support. With
+	// --form-confirm, an ILLEGAL_CONTENT notice from the form on the public
+	// port needs all three and email (INTIMATE_IMAGE needs email only).
+	ReporterName  string `protobuf:"bytes,14,opt,name=reporter_name,json=reporterName,proto3" json:"reporter_name,omitempty"`
+	GoodFaith     bool   `protobuf:"varint,15,opt,name=good_faith,json=goodFaith,proto3" json:"good_faith,omitempty"`
+	Authorized    bool   `protobuf:"varint,16,opt,name=authorized,proto3" json:"authorized,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
 }
 
 func (x *PushRequest) Reset() {
 	*x = PushRequest{}
-	mi := &file_proto_abuse_store_proto_msgTypes[3]
+	mi := &file_proto_abuse_store_proto_msgTypes[5]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -300,7 +480,7 @@ func (x *PushRequest) String() string {
 func (*PushRequest) ProtoMessage() {}
 
 func (x *PushRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_abuse_store_proto_msgTypes[3]
+	mi := &file_proto_abuse_store_proto_msgTypes[5]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -313,7 +493,7 @@ func (x *PushRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use PushRequest.ProtoReflect.Descriptor instead.
 func (*PushRequest) Descriptor() ([]byte, []int) {
-	return file_proto_abuse_store_proto_rawDescGZIP(), []int{3}
+	return file_proto_abuse_store_proto_rawDescGZIP(), []int{5}
 }
 
 func (x *PushRequest) GetNoticeId() string {
@@ -407,6 +587,27 @@ func (x *PushRequest) GetExtraInfohashes() []string {
 	return nil
 }
 
+func (x *PushRequest) GetReporterName() string {
+	if x != nil {
+		return x.ReporterName
+	}
+	return ""
+}
+
+func (x *PushRequest) GetGoodFaith() bool {
+	if x != nil {
+		return x.GoodFaith
+	}
+	return false
+}
+
+func (x *PushRequest) GetAuthorized() bool {
+	if x != nil {
+		return x.Authorized
+	}
+	return false
+}
+
 // The check request message containing the infoHash and, optionally, the
 // content fingerprints of the same torrent. A match on either blocks: the
 // infohash catches the exact torrent, a fingerprint catches the same payload
@@ -421,7 +622,7 @@ type CheckRequest struct {
 
 func (x *CheckRequest) Reset() {
 	*x = CheckRequest{}
-	mi := &file_proto_abuse_store_proto_msgTypes[4]
+	mi := &file_proto_abuse_store_proto_msgTypes[6]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -433,7 +634,7 @@ func (x *CheckRequest) String() string {
 func (*CheckRequest) ProtoMessage() {}
 
 func (x *CheckRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_abuse_store_proto_msgTypes[4]
+	mi := &file_proto_abuse_store_proto_msgTypes[6]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -446,7 +647,7 @@ func (x *CheckRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use CheckRequest.ProtoReflect.Descriptor instead.
 func (*CheckRequest) Descriptor() ([]byte, []int) {
-	return file_proto_abuse_store_proto_rawDescGZIP(), []int{4}
+	return file_proto_abuse_store_proto_rawDescGZIP(), []int{6}
 }
 
 func (x *CheckRequest) GetInfohash() string {
@@ -473,7 +674,7 @@ type CheckReply struct {
 
 func (x *CheckReply) Reset() {
 	*x = CheckReply{}
-	mi := &file_proto_abuse_store_proto_msgTypes[5]
+	mi := &file_proto_abuse_store_proto_msgTypes[7]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -485,7 +686,7 @@ func (x *CheckReply) String() string {
 func (*CheckReply) ProtoMessage() {}
 
 func (x *CheckReply) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_abuse_store_proto_msgTypes[5]
+	mi := &file_proto_abuse_store_proto_msgTypes[7]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -498,7 +699,7 @@ func (x *CheckReply) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use CheckReply.ProtoReflect.Descriptor instead.
 func (*CheckReply) Descriptor() ([]byte, []int) {
-	return file_proto_abuse_store_proto_rawDescGZIP(), []int{5}
+	return file_proto_abuse_store_proto_rawDescGZIP(), []int{7}
 }
 
 func (x *CheckReply) GetExists() bool {
@@ -512,13 +713,24 @@ var File_proto_abuse_store_proto protoreflect.FileDescriptor
 
 const file_proto_abuse_store_proto_rawDesc = "" +
 	"\n" +
-	"\x17proto/abuse-store.proto\"C\n" +
+	"\x17proto/abuse-store.proto\"&\n" +
+	"\x0eConfirmRequest\x12\x14\n" +
+	"\x05token\x18\x01 \x01(\tR\x05token\"\x9e\x01\n" +
+	"\fConfirmReply\x12,\n" +
+	"\x06status\x18\x01 \x01(\x0e2\x14.ConfirmReply.StatusR\x06status\x12\x16\n" +
+	"\x06hashes\x18\x02 \x01(\x05R\x06hashes\"H\n" +
+	"\x06Status\x12\v\n" +
+	"\aUNKNOWN\x10\x00\x12\r\n" +
+	"\tCONFIRMED\x10\x01\x12\x15\n" +
+	"\x11ALREADY_CONFIRMED\x10\x02\x12\v\n" +
+	"\aEXPIRED\x10\x03\"C\n" +
 	"\rExemptRequest\x12\x1a\n" +
 	"\binfohash\x18\x01 \x01(\tR\binfohash\x12\x16\n" +
 	"\x06reason\x18\x02 \x01(\tR\x06reason\"!\n" +
 	"\vExemptReply\x12\x12\n" +
-	"\x04rows\x18\x01 \x01(\x05R\x04rows\"\v\n" +
-	"\tPushReply\"\x8e\x04\n" +
+	"\x04rows\x18\x01 \x01(\x05R\x04rows\"8\n" +
+	"\tPushReply\x12+\n" +
+	"\x11confirmation_sent\x18\x01 \x01(\bR\x10confirmationSent\"\x97\x05\n" +
 	"\vPushRequest\x12\x1b\n" +
 	"\tnotice_id\x18\x01 \x01(\tR\bnoticeId\x12\x1a\n" +
 	"\binfohash\x18\x02 \x01(\tR\binfohash\x12\x1a\n" +
@@ -534,12 +746,20 @@ const file_proto_abuse_store_proto_rawDesc = "" +
 	" \x01(\x0e2\x13.PushRequest.SourceR\x06source\x12 \n" +
 	"\vfingerprint\x18\v \x01(\fR\vfingerprint\x12\x1b\n" +
 	"\tpurge_now\x18\f \x01(\bR\bpurgeNow\x12)\n" +
-	"\x10extra_infohashes\x18\r \x03(\tR\x0fextraInfohashes\"F\n" +
+	"\x10extra_infohashes\x18\r \x03(\tR\x0fextraInfohashes\x12#\n" +
+	"\rreporter_name\x18\x0e \x01(\tR\freporterName\x12\x1d\n" +
+	"\n" +
+	"good_faith\x18\x0f \x01(\bR\tgoodFaith\x12\x1e\n" +
+	"\n" +
+	"authorized\x18\x10 \x01(\bR\n" +
+	"authorized\"k\n" +
 	"\x05Cause\x12\x13\n" +
 	"\x0fILLEGAL_CONTENT\x10\x00\x12\v\n" +
 	"\aMALWARE\x10\x01\x12\r\n" +
 	"\tAPP_ERROR\x10\x02\x12\f\n" +
-	"\bQUESTION\x10\x03\"\x1c\n" +
+	"\bQUESTION\x10\x03\x12\x0f\n" +
+	"\vCSAM_REPORT\x10\x04\x12\x12\n" +
+	"\x0eINTIMATE_IMAGE\x10\x05\"\x1c\n" +
 	"\x06Source\x12\b\n" +
 	"\x04MAIL\x10\x00\x12\b\n" +
 	"\x04FORM\x10\x01\"L\n" +
@@ -548,13 +768,14 @@ const file_proto_abuse_store_proto_rawDesc = "" +
 	"\vfingerprint\x18\x02 \x01(\fR\vfingerprint\"$\n" +
 	"\n" +
 	"CheckReply\x12\x16\n" +
-	"\x06exists\x18\x01 \x01(\bR\x06exists2\x81\x01\n" +
+	"\x06exists\x18\x01 \x01(\bR\x06exists2\xae\x01\n" +
 	"\n" +
 	"AbuseStore\x12\"\n" +
 	"\x04Push\x12\f.PushRequest\x1a\n" +
 	".PushReply\"\x00\x12%\n" +
 	"\x05Check\x12\r.CheckRequest\x1a\v.CheckReply\"\x00\x12(\n" +
-	"\x06Exempt\x12\x0e.ExemptRequest\x1a\f.ExemptReply\"\x00B\x04Z\x02./b\x06proto3"
+	"\x06Exempt\x12\x0e.ExemptRequest\x1a\f.ExemptReply\"\x00\x12+\n" +
+	"\aConfirm\x12\x0f.ConfirmRequest\x1a\r.ConfirmReply\"\x00B\x04Z\x02./b\x06proto3"
 
 var (
 	file_proto_abuse_store_proto_rawDescOnce sync.Once
@@ -568,32 +789,38 @@ func file_proto_abuse_store_proto_rawDescGZIP() []byte {
 	return file_proto_abuse_store_proto_rawDescData
 }
 
-var file_proto_abuse_store_proto_enumTypes = make([]protoimpl.EnumInfo, 2)
-var file_proto_abuse_store_proto_msgTypes = make([]protoimpl.MessageInfo, 6)
+var file_proto_abuse_store_proto_enumTypes = make([]protoimpl.EnumInfo, 3)
+var file_proto_abuse_store_proto_msgTypes = make([]protoimpl.MessageInfo, 8)
 var file_proto_abuse_store_proto_goTypes = []any{
-	(PushRequest_Cause)(0),  // 0: PushRequest.Cause
-	(PushRequest_Source)(0), // 1: PushRequest.Source
-	(*ExemptRequest)(nil),   // 2: ExemptRequest
-	(*ExemptReply)(nil),     // 3: ExemptReply
-	(*PushReply)(nil),       // 4: PushReply
-	(*PushRequest)(nil),     // 5: PushRequest
-	(*CheckRequest)(nil),    // 6: CheckRequest
-	(*CheckReply)(nil),      // 7: CheckReply
+	(ConfirmReply_Status)(0), // 0: ConfirmReply.Status
+	(PushRequest_Cause)(0),   // 1: PushRequest.Cause
+	(PushRequest_Source)(0),  // 2: PushRequest.Source
+	(*ConfirmRequest)(nil),   // 3: ConfirmRequest
+	(*ConfirmReply)(nil),     // 4: ConfirmReply
+	(*ExemptRequest)(nil),    // 5: ExemptRequest
+	(*ExemptReply)(nil),      // 6: ExemptReply
+	(*PushReply)(nil),        // 7: PushReply
+	(*PushRequest)(nil),      // 8: PushRequest
+	(*CheckRequest)(nil),     // 9: CheckRequest
+	(*CheckReply)(nil),       // 10: CheckReply
 }
 var file_proto_abuse_store_proto_depIdxs = []int32{
-	0, // 0: PushRequest.cause:type_name -> PushRequest.Cause
-	1, // 1: PushRequest.source:type_name -> PushRequest.Source
-	5, // 2: AbuseStore.Push:input_type -> PushRequest
-	6, // 3: AbuseStore.Check:input_type -> CheckRequest
-	2, // 4: AbuseStore.Exempt:input_type -> ExemptRequest
-	4, // 5: AbuseStore.Push:output_type -> PushReply
-	7, // 6: AbuseStore.Check:output_type -> CheckReply
-	3, // 7: AbuseStore.Exempt:output_type -> ExemptReply
-	5, // [5:8] is the sub-list for method output_type
-	2, // [2:5] is the sub-list for method input_type
-	2, // [2:2] is the sub-list for extension type_name
-	2, // [2:2] is the sub-list for extension extendee
-	0, // [0:2] is the sub-list for field type_name
+	0,  // 0: ConfirmReply.status:type_name -> ConfirmReply.Status
+	1,  // 1: PushRequest.cause:type_name -> PushRequest.Cause
+	2,  // 2: PushRequest.source:type_name -> PushRequest.Source
+	8,  // 3: AbuseStore.Push:input_type -> PushRequest
+	9,  // 4: AbuseStore.Check:input_type -> CheckRequest
+	5,  // 5: AbuseStore.Exempt:input_type -> ExemptRequest
+	3,  // 6: AbuseStore.Confirm:input_type -> ConfirmRequest
+	7,  // 7: AbuseStore.Push:output_type -> PushReply
+	10, // 8: AbuseStore.Check:output_type -> CheckReply
+	6,  // 9: AbuseStore.Exempt:output_type -> ExemptReply
+	4,  // 10: AbuseStore.Confirm:output_type -> ConfirmReply
+	7,  // [7:11] is the sub-list for method output_type
+	3,  // [3:7] is the sub-list for method input_type
+	3,  // [3:3] is the sub-list for extension type_name
+	3,  // [3:3] is the sub-list for extension extendee
+	0,  // [0:3] is the sub-list for field type_name
 }
 
 func init() { file_proto_abuse_store_proto_init() }
@@ -606,8 +833,8 @@ func file_proto_abuse_store_proto_init() {
 		File: protoimpl.DescBuilder{
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_proto_abuse_store_proto_rawDesc), len(file_proto_abuse_store_proto_rawDesc)),
-			NumEnums:      2,
-			NumMessages:   6,
+			NumEnums:      3,
+			NumMessages:   8,
 			NumExtensions: 0,
 			NumServices:   1,
 		},

@@ -100,6 +100,23 @@ func newApp() *cli.App {
 					Usage: "Where the notice came from: form or mail",
 					Value: "form",
 				},
+				cli.StringFlag{
+					Name:  "cause",
+					Usage: "illegal, malware, app_error, question, csam_report or intimate_image",
+					Value: "illegal",
+				},
+				cli.StringFlag{
+					Name:  "reporter-name",
+					Usage: "Reporter's name (with --good-faith and --authorized, what a takedown notice from the form needs under --form-confirm)",
+				},
+				cli.BoolFlag{
+					Name:  "good-faith",
+					Usage: "The reporter states in good faith that the use is not authorized",
+				},
+				cli.BoolFlag{
+					Name:  "authorized",
+					Usage: "The reporter states they own the work or are authorized to act for its owner",
+				},
 			},
 			Action: func(c *cli.Context) error {
 				addr := fmt.Sprintf("%s:%d", c.GlobalString("host"), c.GlobalInt("port"))
@@ -127,6 +144,13 @@ func newApp() *cli.App {
 				if !ok {
 					return fmt.Errorf("source %q is not form or mail", c.String("source"))
 				}
+				cause, ok := pb.PushRequest_Cause_value[strings.ToUpper(c.String("cause"))]
+				if strings.EqualFold(c.String("cause"), "illegal") {
+					cause, ok = int32(pb.PushRequest_ILLEGAL_CONTENT), true
+				}
+				if !ok {
+					return fmt.Errorf("cause %q is not illegal, malware, app_error, question, csam_report or intimate_image", c.String("cause"))
+				}
 				var startedAt int64
 				if v := strings.TrimSpace(c.String("started-at")); v != "" {
 					if startedAt, err = strconv.ParseInt(v, 10, 64); err != nil {
@@ -137,7 +161,7 @@ func newApp() *cli.App {
 						startedAt = t.Unix()
 					}
 				}
-				_, err = cl.Push(ctx, &pb.PushRequest{
+				r, err := cl.Push(ctx, &pb.PushRequest{
 					Fingerprint:     fp,
 					Work:            c.String("work"),
 					Filename:        c.String("filename"),
@@ -150,10 +174,17 @@ func newApp() *cli.App {
 					StartedAt:       startedAt,
 					PurgeNow:        c.Bool("purge-now"),
 					Source:          pb.PushRequest_Source(source),
-					Cause:           pb.PushRequest_ILLEGAL_CONTENT,
+					Cause:           pb.PushRequest_Cause(cause),
+					ReporterName:    c.String("reporter-name"),
+					GoodFaith:       c.Bool("good-faith"),
+					Authorized:      c.Bool("authorized"),
 				})
 				if err != nil {
 					return err
+				}
+				if r.GetConfirmationSent() {
+					fmt.Println("Held until the reporter confirms it: the link was mailed to them")
+					return nil
 				}
 				fmt.Println("Done")
 
@@ -201,6 +232,35 @@ func newApp() *cli.App {
 					return err
 				}
 				fmt.Println(r.Exists)
+
+				return nil
+			},
+		},
+		{
+			Name:  "confirm",
+			Usage: "confirms a form notice held under --form-confirm, with the token of its link (the t parameter); prints the status and the number of infohashes",
+			Flags: []cli.Flag{
+				cli.StringFlag{
+					Name:  "token",
+					Usage: "the t parameter of the confirmation link",
+				},
+			},
+			Action: func(c *cli.Context) error {
+				addr := fmt.Sprintf("%s:%d", c.GlobalString("host"), c.GlobalInt("port"))
+				conn, err := grpc.Dial(addr, grpc.WithInsecure())
+				if err != nil {
+					return err
+				}
+				defer conn.Close()
+				cl := pb.NewAbuseStoreClient(conn)
+
+				ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
+				defer cancel()
+				r, err := cl.Confirm(ctx, &pb.ConfirmRequest{Token: c.String("token")})
+				if err != nil {
+					return err
+				}
+				fmt.Println(r.GetStatus(), r.GetHashes())
 
 				return nil
 			},

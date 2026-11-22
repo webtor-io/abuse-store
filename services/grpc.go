@@ -2,6 +2,10 @@ package services
 
 import (
 	"context"
+	"crypto/rand"
+	"crypto/sha256"
+	"encoding/base64"
+	"encoding/json"
 	"fmt"
 	"net"
 	"regexp"
@@ -36,9 +40,11 @@ func normalizeInfohash(h string) string {
 }
 
 const (
-	grpcHostFlag  = "grpc-host"
-	grpcPortFlag  = "grpc-port"
-	adminPortFlag = "admin-port"
+	grpcHostFlag    = "grpc-host"
+	grpcPortFlag    = "grpc-port"
+	adminPortFlag   = "admin-port"
+	formConfirmFlag = "form-confirm"
+	confirmURLFlag  = "confirm-url"
 )
 
 // adminHost is where the admin listener binds, and the whole of its access
@@ -67,6 +73,17 @@ func RegisterGRPCFlags(f []cli.Flag) []cli.Flag {
 			Value:  50052,
 			EnvVar: "ADMIN_GRPC_PORT",
 		},
+		cli.BoolFlag{
+			Name:   formConfirmFlag,
+			Usage:  "hold ILLEGAL_CONTENT and INTIMATE_IMAGE notices from the form on the public port until the reporter confirms them through a link mailed to them",
+			EnvVar: "FORM_CONFIRM",
+		},
+		cli.StringFlag{
+			Name:   confirmURLFlag,
+			Usage:  "page the confirmation link opens; the token is appended as ?t=",
+			Value:  "https://webtor.io/support/confirm",
+			EnvVar: "CONFIRM_URL",
+		},
 	)
 }
 
@@ -80,24 +97,31 @@ const gracefulStopTimeout = 15 * time.Second
 // serves Push and Check and ignores purge_now; the admin one also honours
 // purge_now and serves Exempt, the two calls that override a decision: an
 // immediate ban beats an exemption, an exemption lifts a ban.
+//
+// With formConfirm, the public one holds form notices that would ban until
+// their reporter confirms them (Confirm, on both listeners).
 type GRPC struct {
 	pb.UnimplementedAbuseStoreServer
-	host   string
-	port   int
-	admin  bool
-	ln     net.Listener
-	store  *Store
-	mailer *Mailer
-	mu     sync.Mutex
-	gs     *grpc.Server
+	host        string
+	port        int
+	admin       bool
+	formConfirm bool
+	confirmURL  string
+	ln          net.Listener
+	store       *Store
+	mailer      *Mailer
+	mu          sync.Mutex
+	gs          *grpc.Server
 }
 
 func NewGRPC(c *cli.Context, s *Store, mr *Mailer) *GRPC {
 	return &GRPC{
-		host:   c.String(grpcHostFlag),
-		port:   c.Int(grpcPortFlag),
-		store:  s,
-		mailer: mr,
+		host:        c.String(grpcHostFlag),
+		port:        c.Int(grpcPortFlag),
+		formConfirm: c.Bool(formConfirmFlag),
+		confirmURL:  c.String(confirmURLFlag),
+		store:       s,
+		mailer:      mr,
 	}
 }
 
@@ -154,7 +178,7 @@ func (s *GRPC) Push(ctx context.Context, in *pb.PushRequest) (*pb.PushReply, err
 	// re-uploads — and it used to be worse than useless, because a row with
 	// no infohash could not be cached at all and took the whole sync down
 	// with it.
-	if in.GetCause() == pb.PushRequest_ILLEGAL_CONTENT && infohash == "" && len(in.GetFingerprint()) != fingerprintSize {
+	if bans(in.GetCause()) && infohash == "" && len(in.GetFingerprint()) != fingerprintSize {
 		return nil, status.Error(codes.InvalidArgument, "illegal content report needs an infohash or a content fingerprint")
 	}
 
@@ -171,25 +195,33 @@ func (s *GRPC) Push(ctx context.Context, in *pb.PushRequest) (*pb.PushReply, err
 		subject = fmt.Sprintf("Abuse notice %v", noticeID)
 	}
 	a := &m.Abuse{
-		NoticeID:    noticeID,
-		StartedAt:   startedAt,
-		Work:        in.GetWork(),
-		Filename:    in.GetFilename(),
-		Infohash:    infohash,
-		Description: in.GetDescription(),
-		Email:       email,
-		Subject:     subject,
-		Fingerprint: in.GetFingerprint(),
-		Cause:       int(in.GetCause()),
-		Source:      int(in.GetSource()),
+		NoticeID:     noticeID,
+		StartedAt:    startedAt,
+		Work:         in.GetWork(),
+		Filename:     in.GetFilename(),
+		Infohash:     infohash,
+		Description:  in.GetDescription(),
+		Email:        email,
+		Subject:      subject,
+		Fingerprint:  in.GetFingerprint(),
+		Cause:        int(in.GetCause()),
+		Source:       int(in.GetSource()),
+		ReporterName: in.GetReporterName(),
+		GoodFaith:    in.GetGoodFaith(),
+		Authorized:   in.GetAuthorized(),
 	}
-	n := &Notice{Abuse: a}
-	if in.GetCause() != pb.PushRequest_ILLEGAL_CONTENT {
+	if !bans(in.GetCause()) {
+		n := &Notice{Abuse: a}
 		for _, h := range hashes {
 			n.Hashes = append(n.Hashes, NoticeHash{Infohash: h})
 		}
 		s.notify(n)
 		return &pb.PushReply{}, nil
+	}
+	// Only the public listener has formConfirm (NewGRPC): the automated
+	// intake (MAIL) and the admin port ban as before.
+	if s.formConfirm && in.GetSource() == pb.PushRequest_FORM {
+		return s.askConfirmation(ctx, a, hashes)
 	}
 	// The block is immediate; the purge waits out the delay unless the caller
 	// on the admin port or the server (delay 0) says otherwise. Sync publishes
@@ -199,6 +231,25 @@ func (s *GRPC) Push(ctx context.Context, in *pb.PushRequest) (*pb.PushReply, err
 		log.WithField("notice_id", noticeID).WithField("infohash", strings.Join(hashes, ",")).
 			Warn("purge_now ignored on the public port")
 	}
+	n, err := s.ban(ctx, a, hashes, override)
+	if err != nil {
+		return nil, err
+	}
+	s.notify(n)
+	return &pb.PushReply{}, nil
+}
+
+// bans reports whether a notice of cause c blocks what it names. The others
+// are mailed only, CSAM_REPORT included: a report of it is for a person to
+// look at, and the bans go through the admin port.
+func bans(c pb.PushRequest_Cause) bool {
+	return c == pb.PushRequest_ILLEGAL_CONTENT || c == pb.PushRequest_INTIMATE_IMAGE
+}
+
+// ban stores a banning notice, hash by hash, and returns it for the letters;
+// AlreadyExists when it changed nothing.
+func (s *GRPC) ban(ctx context.Context, a *m.Abuse, hashes []string, override bool) (*Notice, error) {
+	n := &Notice{Abuse: a}
 	n.PurgeNow = override || s.store.pd <= 0
 	a.PurgeAfter = time.Now()
 	if !n.PurgeNow {
@@ -231,8 +282,107 @@ func (s *GRPC) Push(ctx context.Context, in *pb.PushRequest) (*pb.PushReply, err
 	if !slices.ContainsFunc(n.Hashes, func(h NoticeHash) bool { return !h.Existed || h.Advanced }) {
 		return nil, status.Errorf(codes.AlreadyExists, "abuse notice with infoHash=%v already exists", strings.Join(hashes, ","))
 	}
-	s.notify(n)
-	return &pb.PushReply{}, nil
+	return n, nil
+}
+
+// pendingNotice is what an unconfirmed notice keeps for Confirm to replay
+// through ban: the notice as Push normalized it, and its infohashes.
+type pendingNotice struct {
+	Abuse  *m.Abuse
+	Hashes []string
+}
+
+// tokenSize is the random part of a confirmation link, in bytes.
+const tokenSize = 32
+
+// askConfirmation holds a form notice that would ban until its reporter
+// confirms it, and mails them the link. Nothing is blocked or mailed to
+// support until then. The address must be theirs: a takedown notice also
+// needs their name and both statements.
+func (s *GRPC) askConfirmation(ctx context.Context, a *m.Abuse, hashes []string) (*pb.PushReply, error) {
+	if a.Email == "" {
+		return nil, status.Error(codes.InvalidArgument, "a notice from the form needs the reporter's email, to confirm it")
+	}
+	if a.Cause == int(pb.PushRequest_ILLEGAL_CONTENT) && (strings.TrimSpace(a.ReporterName) == "" || !a.GoodFaith || !a.Authorized) {
+		return nil, status.Error(codes.InvalidArgument, "a takedown notice needs the reporter's name and both statements")
+	}
+	// Nothing to confirm when every hash already blocks: AlreadyExists and no
+	// letter, as without the flag.
+	if !slices.ContainsFunc(hashes, func(h string) bool { return h == "" || s.store.Check(h, nil) != nil }) {
+		return nil, status.Errorf(codes.AlreadyExists, "abuse notice with infoHash=%v already exists", strings.Join(hashes, ","))
+	}
+	// The notice id goes into the confirmation letter's subject, which must
+	// carry nothing the caller typed: a uuid, rewritten canonically, or a new one.
+	id, err := uuid.FromString(a.NoticeID)
+	if err != nil {
+		id = uuid.NewV4()
+	}
+	a.NoticeID = id.String()
+	notice, err := json.Marshal(pendingNotice{Abuse: a, Hashes: hashes})
+	if err != nil {
+		return nil, status.Error(codes.Internal, err.Error())
+	}
+	tok := make([]byte, tokenSize)
+	_, _ = rand.Read(tok) // never fails (crypto/rand, Go 1.24+)
+	th := sha256.Sum256(tok)
+	expires, err := s.store.AddUnconfirmed(ctx, th[:], a.Email, notice)
+	if errors.Is(err, ErrTooManyNotices) {
+		return nil, status.Error(codes.ResourceExhausted, err.Error())
+	} else if err != nil {
+		return nil, status.Error(codes.Internal, err.Error())
+	}
+	link := s.confirmURL + "?t=" + base64.RawURLEncoding.EncodeToString(tok)
+	// Sent before replying, unlike the other letters: without it the notice
+	// can never be confirmed, and the reporter is told to look for it.
+	named := slices.DeleteFunc(slices.Clone(hashes), func(h string) bool { return h == "" })
+	if err := s.mailer.SendConfirmEmail(a.Email, a.NoticeID, link, named, expires); err != nil {
+		log.WithError(err).WithField("notice_id", a.NoticeID).Error("failed to send confirmation email")
+		if err := s.store.DropUnconfirmed(th[:]); err != nil {
+			log.WithError(err).WithField("notice_id", a.NoticeID).Error("failed to drop unconfirmed notice")
+		}
+		return nil, status.Error(codes.Unavailable, "failed to send the confirmation email")
+	}
+	log.WithField("notice_id", a.NoticeID).WithField("infohash", strings.Join(hashes, ",")).Info("notice waits for confirmation")
+	return &pb.PushReply{ConfirmationSent: true}, nil
+}
+
+// Confirm stores and mails a notice held by askConfirmation, once, as Push
+// would have without the flag; on both listeners, since the token is the
+// credential. A notice whose every hash got blocked meanwhile is confirmed
+// with no letters, as a repeat Push is AlreadyExists and silent.
+func (s *GRPC) Confirm(ctx context.Context, in *pb.ConfirmRequest) (*pb.ConfirmReply, error) {
+	// One that does not decode matches no stored hash: UNKNOWN.
+	tok, _ := base64.RawURLEncoding.DecodeString(in.GetToken())
+	th := sha256.Sum256(tok)
+	var p pendingNotice
+	var n *Notice
+	err := s.store.Confirm(ctx, th[:], func(notice []byte) error {
+		if err := json.Unmarshal(notice, &p); err != nil {
+			return err
+		}
+		var berr error
+		if n, berr = s.ban(ctx, p.Abuse, p.Hashes, false); status.Code(berr) == codes.AlreadyExists {
+			return nil
+		}
+		return berr
+	})
+	switch {
+	case errors.Is(err, ErrNotFound):
+		return &pb.ConfirmReply{Status: pb.ConfirmReply_UNKNOWN}, nil
+	case errors.Is(err, ErrNoticeConfirmed):
+		return &pb.ConfirmReply{Status: pb.ConfirmReply_ALREADY_CONFIRMED}, nil
+	case errors.Is(err, ErrNoticeExpired):
+		return &pb.ConfirmReply{Status: pb.ConfirmReply_EXPIRED}, nil
+	case err != nil:
+		log.WithError(err).Error("failed to confirm notice")
+		return nil, status.Error(codes.Internal, err.Error())
+	}
+	if n != nil {
+		n.Confirmed = true
+		s.notify(n)
+	}
+	log.WithField("notice_id", p.Abuse.NoticeID).Info("notice confirmed")
+	return &pb.ConfirmReply{Status: pb.ConfirmReply_CONFIRMED, Hashes: int32(len(slices.DeleteFunc(p.Hashes, func(h string) bool { return h == "" })))}, nil
 }
 
 // noticeInfohashes normalizes and validates the primary infohash and the
@@ -262,11 +412,11 @@ func oneLine(v string) string {
 	return strings.NewReplacer("\r", "", "\n", "").Replace(v)
 }
 
-// notify mails the reporter (when they left an address) and support, once
-// per notice whatever the number of infohashes. Best effort: failures are
-// logged and never fail the RPC.
+// notify mails the reporter (when they left an address; never for a CSAM
+// report) and support, once per notice whatever the number of infohashes.
+// Best effort: failures are logged and never fail the RPC.
 func (s *GRPC) notify(n *Notice) {
-	if n.Abuse.Email != "" {
+	if n.Abuse.Email != "" && n.Abuse.Cause != int(pb.PushRequest_CSAM_REPORT) {
 		go func() {
 			if err := s.mailer.SendUserEmail(n); err != nil {
 				log.WithError(err).Error("failed to send user email")
