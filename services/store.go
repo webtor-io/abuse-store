@@ -2,6 +2,7 @@ package services
 
 import (
 	"bytes"
+	"context"
 	"encoding/hex"
 	"encoding/json"
 	"strings"
@@ -9,6 +10,7 @@ import (
 	"time"
 
 	"github.com/dgraph-io/badger/v3"
+	"github.com/go-pg/pg/v10"
 	"github.com/pkg/errors"
 	log "github.com/sirupsen/logrus"
 	"github.com/urfave/cli"
@@ -23,6 +25,8 @@ const (
 
 var (
 	ErrNotFound = errors.New("store: abuse not found")
+	// ErrPurgeDue is Exempt refusing an infohash outside its review window.
+	ErrPurgeDue = errors.New("store: purge due, not in the review window")
 )
 
 // fingerprintSize is the length of a SHA-256 digest. Values of any other
@@ -198,27 +202,6 @@ func (s *Store) PublishBanned(h string) {
 	}
 }
 
-// PurgeNow brings any pending purge of h forward to now and publishes it, and
-// reports whether a pending purge was brought forward. Moving purge_after
-// first makes a failed publish one that Sync retries at its next pass instead
-// of after the delay.
-func (s *Store) PurgeNow(h string) (advanced bool) {
-	if h == "" {
-		return false
-	}
-	if pg := s.p.Get(); pg != nil {
-		now := time.Now()
-		r, err := pg.Exec(`UPDATE abuse SET purge_after = ? WHERE infohash = ? AND purge_after > ?`, now, h, now)
-		if err != nil {
-			log.WithError(err).WithField("infohash", h).Error("failed to bring purge forward")
-		} else {
-			advanced = r.RowsAffected() > 0
-		}
-	}
-	s.PublishBanned(h)
-	return advanced
-}
-
 // fanOut publishes resource.banned for every infohash that blocks and is due
 // but was never published, and forgets every recorded one that no longer
 // blocks, so a ban that comes back — an exemption lifted, a deleted row
@@ -292,18 +275,98 @@ func (s *Store) publish(h string) bool {
 	return true
 }
 
-// IsExempt reports whether the infohash was reviewed and exempted. It asks
-// Postgres, not the cache: Push is rare, and an exemption set by hand must
-// hold for the very next report, not after the next sync.
-func (s *Store) IsExempt(h string) (bool, error) {
-	if h == "" {
-		return false, nil
+// Exempt sets exempt on the rows of h it read and lifts its block at once, but
+// only while the ban is in its review window: h has rows, and every non-exempt
+// one has a purge_after still ahead. An immediate purge (purge_now: the
+// agents' bans), a row from before the delay (NULL) or a purge already due is
+// ErrPurgeDue, left to a hand UPDATE in Postgres, and so is a due row that
+// landed after the read; no rows is ErrNotFound.
+// Returns the rows changed, 0 when h was already exempt. ctx bounds the
+// transaction, so a caller that gave up is not exempted later, when a row
+// lock it waited on is released.
+//
+// It takes mu like Push and Sync, but only after the commit, for the cache
+// reload: a Sync that read the table before the commit holds mu until its
+// prune is done, so the reload runs after it on a fresh read and the stale
+// rows cannot put h back. Waiting on a row lock while holding mu would stall
+// every Push and Sync on the replica until that lock is released.
+func (s *Store) Exempt(ctx context.Context, h string) (int, error) {
+	db := s.p.Get()
+	if db == nil {
+		return 0, errors.New("database not initialized")
 	}
-	pg := s.p.Get()
-	if pg == nil {
-		return false, errors.New("database not initialized")
+	tx, err := db.BeginContext(ctx)
+	if err != nil {
+		return 0, err
 	}
-	return pg.Model((*m.Abuse)(nil)).Where("infohash = ? AND exempt", h).Exists()
+	defer func() { _ = tx.Close() }()
+	// FOR UPDATE: an immediate ban of h (Push, maybe on another replica)
+	// either commits first, and the rows it made due are refused below, or
+	// waits for this commit and then clears the exemption.
+	var rows []*m.Abuse
+	if err := tx.Model(&rows).Where("infohash = ?", h).For("UPDATE").Select(); err != nil {
+		return 0, err
+	}
+	if len(rows) == 0 {
+		return 0, ErrNotFound
+	}
+	// The rule of dueInfohashes, by the later of two clocks: ours, and the
+	// database's for a row it timestamped (a hand INSERT with now()). With
+	// only ours, a database clock a few ms ahead made a just-written immediate
+	// row look pending, and it was exempted.
+	now := time.Now()
+	var dbNow time.Time
+	if _, err := tx.QueryOne(pg.Scan(&dbNow), `SELECT clock_timestamp()`); err != nil {
+		return 0, err
+	}
+	if dbNow.After(now) {
+		now = dbNow
+	}
+	ids := make([]string, 0, len(rows))
+	for _, a := range rows {
+		if !a.Exempt && !a.PurgeAfter.After(now) {
+			return 0, ErrPurgeDue
+		}
+		ids = append(ids, a.ID.String())
+	}
+	// Only the rows checked above: one inserted since the read is not locked
+	// and was never checked.
+	r, err := tx.Exec(`UPDATE abuse SET exempt = true WHERE abuse_id IN (?) AND NOT exempt`, pg.In(ids))
+	if err != nil {
+		return 0, err
+	}
+	// The exemption shadows every row of h, the unchecked ones included: if
+	// one of them is due, refuse and roll the UPDATE back. Due by either
+	// clock: the database's for a row it timestamped (a hand INSERT), ours
+	// for one a replica did. Not now(): that is when this transaction began,
+	// before the row landed.
+	// ponytail: a row landing between this read and the commit is still
+	// shadowed; an advisory lock on h, taken by every writer, would close it.
+	var due int
+	if _, err := tx.QueryOne(pg.Scan(&due), `SELECT count(*) FROM abuse WHERE infohash = ? AND NOT exempt
+		AND (purge_after IS NULL OR purge_after <= GREATEST(clock_timestamp(), ?))`, h, time.Now()); err != nil {
+		return 0, err
+	}
+	if due > 0 {
+		return 0, ErrPurgeDue
+	}
+	if err := tx.Commit(); err != nil {
+		return 0, err
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	// The cache half of Sync on a fresh read, also when nothing changed, so a
+	// retry repairs a failed one. Deleting only h's key would leave the
+	// fingerprint of its row blocking the payload until the next sync.
+	var all []*m.Abuse
+	if err := db.Model(&all).Select(); err != nil {
+		return r.RowsAffected(), errors.Wrap(err, "exempted, but failed to reload the cache")
+	}
+	keep, _, _, _ := s.load(all)
+	if _, err := s.prune(keep); err != nil {
+		return r.RowsAffected(), errors.Wrap(err, "exempted, but failed to prune the cache")
+	}
+	return r.RowsAffected(), nil
 }
 
 // prune deletes every cached key not in keep and reports how many it removed.
@@ -374,25 +437,99 @@ func (s *Store) Check(i string, fingerprint []byte) error {
 	})
 }
 
-func (s *Store) Push(a *m.Abuse) error {
+// Push stores one infohash of a notice and reports what became of it. It
+// holds mu throughout, so Sync's prune and Exempt's cache reload come before
+// or after it, never in the middle, and one transaction makes the decision
+// and the write.
+//
+// An ordinary report of an exempt infohash is absorbed (Exempt, nothing
+// stored); one of an infohash already blocked gets no new row (Existed).
+//
+// An override (purge_now on the admin port: the owner's or the agents' ban)
+// beats every exemption, set by hand or with Exempt: in the same transaction
+// it clears exempt on the infohash's rows (Overridden), brings any pending
+// purge forward (Advanced) and stores the row, and the caller publishes. The
+// rows are read FOR UPDATE, so an Exempt racing it either commits first and
+// is cleared here, or waits and then finds the ban due and refuses.
+//
+// ponytail: an override waits for a row lock held elsewhere (an open hand
+// UPDATE in psql) while holding mu, stalling Push and Sync on the replica
+// until the lock goes or ctx ends; take the row locks before mu if that bites.
+func (s *Store) Push(ctx context.Context, a *m.Abuse, override bool) (NoticeHash, error) {
+	nh := NoticeHash{Infohash: a.Infohash}
 	if len(a.Fingerprint) != 0 && len(a.Fingerprint) != fingerprintSize {
 		// Refuse rather than store: a malformed digest would sit in the index
 		// matching nothing while looking like coverage.
 		log.WithField("infohash", a.Infohash).WithField("len", len(a.Fingerprint)).Warn("dropping fingerprint of wrong length")
 		a.Fingerprint = nil
 	}
+	db := s.p.Get()
+	if db == nil {
+		return nh, errors.New("database not initialized")
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	pg := s.p.Get()
-	_, err := pg.Model(a).Insert()
+	tx, err := db.BeginContext(ctx)
 	if err != nil {
-		return errors.Wrapf(err, "failed to push to db abuse=%+v", a)
+		return nh, err
 	}
-	err = s.pushToCache(a)
-	if err != nil {
-		return errors.Wrapf(err, "failed to push to cache abuse=%+v", a)
+	defer func() { _ = tx.Close() }()
+	// Postgres, not the cache: an exemption set by hand must hold for the very
+	// next report, not after the next sync.
+	var rows []*m.Abuse
+	if a.Infohash != "" {
+		q := tx.Model(&rows).Where("infohash = ?", a.Infohash)
+		if override {
+			q = q.For("UPDATE")
+		}
+		if err := q.Select(); err != nil {
+			return nh, errors.Wrap(err, "failed to read the infohash's rows")
+		}
 	}
-	return nil
+	now := time.Now()
+	exempt := false
+	for _, r := range rows {
+		exempt = exempt || r.Exempt
+		nh.Advanced = nh.Advanced || override && !r.Exempt && r.PurgeAfter.After(now)
+	}
+	if exempt && !override {
+		nh.Exempt = true
+		return nh, nil
+	}
+	nh.Overridden = exempt
+	// Deduplicate on the REPORT, not on the payload: no fingerprint here. A
+	// newly reported infohash whose payload is already blocked still gets its
+	// own row, or the audit trail loses the fact that it was reported at all.
+	// An exempt one was not blocked, whatever the cache still says.
+	if err := s.Check(a.Infohash, nil); err == nil {
+		nh.Existed = !exempt
+	} else if !errors.Is(err, ErrNotFound) {
+		return nh, err
+	}
+	if nh.Overridden || nh.Advanced {
+		if _, err := tx.Exec(`UPDATE abuse SET exempt = false, purge_after = ? WHERE infohash = ? AND (exempt OR purge_after > ?)`,
+			now, a.Infohash, now); err != nil {
+			return nh, errors.Wrap(err, "failed to override the exemption")
+		}
+	}
+	if !nh.Existed {
+		if _, err := tx.Model(a).Insert(); err != nil {
+			return nh, errors.Wrapf(err, "failed to push to db abuse=%+v", a)
+		}
+		rows = append(rows, a)
+	}
+	if err := tx.Commit(); err != nil {
+		return nh, errors.Wrap(err, "failed to commit")
+	}
+	// Every row of the infohash now blocks, the fingerprints of rows an
+	// override set blocking again included.
+	for _, r := range rows {
+		r.Exempt = false
+		if err := s.pushToCache(r); err != nil {
+			return nh, errors.Wrapf(err, "failed to push to cache abuse=%+v", r)
+		}
+	}
+	return nh, nil
 }
 
 // pushToCacheRaw writes an arbitrary cache entry. Split out of pushToCache so

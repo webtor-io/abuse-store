@@ -88,14 +88,19 @@ type Notice struct {
 }
 
 type NoticeHash struct {
-	Infohash string
-	Exempt   bool // reviewed and exempt: not stored, never purged
-	Existed  bool // already in the stoplist before this notice
-	Advanced bool // purge_now replaced a purge an earlier notice scheduled
+	Infohash   string
+	Exempt     bool // reviewed and exempt: not stored, never purged
+	Existed    bool // already in the stoplist before this notice
+	Advanced   bool // purge_now replaced a purge an earlier notice scheduled
+	Overridden bool // purge_now cleared its exemption: blocked and purged
 }
 
 func (n *Notice) AnyExempt() bool {
 	return slices.ContainsFunc(n.Hashes, func(h NoticeHash) bool { return h.Exempt })
+}
+
+func (n *Notice) AnyOverridden() bool {
+	return slices.ContainsFunc(n.Hashes, func(h NoticeHash) bool { return h.Overridden })
 }
 
 func (n *Notice) AllExempt() bool {
@@ -147,6 +152,19 @@ func (s *Mailer) SendUserEmail(n *Notice) error {
 	} else {
 		log.Infof("notification sent to=%v", a.Email)
 	}
+	return nil
+}
+
+// SendExemptEmail tells support that h was exempted through the admin port,
+// so every exemption set without a hand UPDATE leaves a letter.
+func (s *Mailer) SendExemptEmail(h, reason string, rows int) error {
+	body := fmt.Sprintf("Exempted through the admin port: %s\nRows set exempt: %d\nReason: %s\n\n"+
+		"The block is lifted and the scheduled purge will not go out. To ban it again, push it with purge_now on the admin port.\n",
+		h, rows, reason)
+	if err := s.smtp.Send(s.sender, s.support, "", fmt.Sprintf("[exempt] %s — %s", h, reason), body); err != nil {
+		return errors.Wrap(err, "failed to send exempt notification")
+	}
+	log.Infof("exempt notification sent to=%v", s.support)
 	return nil
 }
 

@@ -4,6 +4,7 @@ import (
 	"crypto/tls"
 	"fmt"
 	"github.com/urfave/cli"
+	"mime"
 	"net/mail"
 	"net/smtp"
 )
@@ -79,7 +80,10 @@ func (s *SMTP) Send(from string, to string, replyTo string, subj string, body st
 	if replyTo != "" {
 		headers["Reply-To"] = replyTo
 	}
-	headers["Subject"] = subj
+	// Encoded: the subject carries what reporters typed, and a raw CR LF in it
+	// would start a header of their choosing (Bcc, say). Plain ASCII passes
+	// through unchanged.
+	headers["Subject"] = mime.QEncoding.Encode("utf-8", subj)
 
 	// Setup message
 	message := ""

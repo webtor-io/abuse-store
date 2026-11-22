@@ -1,6 +1,8 @@
 package main
 
 import (
+	"sync"
+
 	"github.com/dgraph-io/badger/v3"
 	log "github.com/sirupsen/logrus"
 	"github.com/urfave/cli"
@@ -79,12 +81,28 @@ func serve(c *cli.Context) error {
 	probe := cs.NewProbe(c)
 	defer probe.Close()
 
-	// Setting GRPC
-	grpc := s.NewGRPC(c, st, mr)
-	defer grpc.Close()
+	// Setting GRPC: the public listener, and the admin one on 127.0.0.1
+	// unless --admin-port is 0.
+	servers := []*s.GRPC{s.NewGRPC(c, st, mr)}
+	if admin := s.NewAdminGRPC(c, st, mr); admin != nil {
+		servers = append(servers, admin)
+	}
+	// Drained side by side: each waits up to its own graceful-stop timeout,
+	// and one after the other would not fit the pod's grace period.
+	defer func() {
+		var wg sync.WaitGroup
+		for _, g := range servers {
+			wg.Go(g.Close)
+		}
+		wg.Wait()
+	}()
 
 	// Setting Serve
-	serve := cs.NewServe(probe, grpc, st)
+	servables := []cs.Servable{probe, st}
+	for _, g := range servers {
+		servables = append(servables, g)
+	}
+	serve := cs.NewServe(servables...)
 
 	// And SERVE!
 	err = serve.Serve()
