@@ -292,3 +292,66 @@ func TestPGStorePushRechecksTheExemption(t *testing.T) {
 		t.Fatalf("%d rows, want 1", n)
 	}
 }
+
+// An exemption set through the RPC absorbs a later ordinary report, but gives
+// way to an immediate one (the agents' purge_now): that ban is stored with its
+// fingerprint, blocks on both arms, is published and survives Sync, and Exempt
+// refuses the hash from then on. Otherwise any caller in the cluster could
+// make a hash immune to a CSAM ban by reporting and exempting it first.
+func TestPGImmediateBanOverridesAnRPCExemption(t *testing.T) {
+	e := newPGEnv(t, "72h")
+	fp := digest(0x77)
+	e.push(t, &pb.PushRequest{Infohash: hashA})
+	if rows, c := e.exempt(t, hashA); c != codes.OK || rows != 1 {
+		t.Fatalf("exempt: rows %d, %v; want 1, OK", rows, c)
+	}
+	if c := e.push(t, &pb.PushRequest{Infohash: hashA}); c != codes.OK {
+		t.Fatalf("ordinary repeat: %v", c)
+	}
+	if blocked(t, e.s, hashA, nil) || e.count(t, `SELECT count(*) FROM abuse`) != 1 {
+		t.Fatal("ordinary repeat not absorbed by the exemption")
+	}
+
+	if c := e.push(t, &pb.PushRequest{Infohash: hashA, PurgeNow: true, Fingerprint: fp}); c != codes.OK {
+		t.Fatalf("immediate ban: %v", c)
+	}
+	if got := e.banned(); !slices.Equal(got, []string{hashA}) {
+		t.Fatalf("published %v, want [%s]", got, hashA)
+	}
+	if !blocked(t, e.s, hashA, nil) || !blocked(t, e.s, "", fp) {
+		t.Fatal("immediate ban does not block on both arms")
+	}
+	e.sync(t)
+	if !blocked(t, e.s, hashA, nil) || !blocked(t, e.s, "", fp) {
+		t.Fatal("immediate ban lifted by Sync")
+	}
+	if n := e.count(t, `SELECT count(*) FROM abuse WHERE exempt OR exempt_by_rpc`); n != 0 {
+		t.Fatalf("%d rows still exempt", n)
+	}
+	if _, c := e.exempt(t, hashA); c != codes.FailedPrecondition {
+		t.Fatalf("exempt after the immediate ban: %v, want FailedPrecondition", c)
+	}
+}
+
+// Exempt changes only the rows it checked. One that landed while its read
+// waited on a lock, here an immediate ban, is not in its window and is left
+// non-exempt for its Push's PurgeNow to clear the exemption by.
+func TestPGExemptLeavesARowThatLandedWhileItWaited(t *testing.T) {
+	e := newPGEnv(t, "72h")
+	e.push(t, &pb.PushRequest{Infohash: hashA})
+	commit := e.holdRowLock(t, hashA)
+	exempted := make(chan *pb.ExemptReply, 1)
+	go func() {
+		r, _ := e.g.Exempt(context.Background(), &pb.ExemptRequest{Infohash: hashA})
+		exempted <- r
+	}()
+	time.Sleep(200 * time.Millisecond)
+	e.exec(t, `INSERT INTO abuse (infohash, purge_after) VALUES (?, now())`, hashA)
+	commit()
+	if r := <-exempted; r.GetRows() != 1 {
+		t.Fatalf("exempt: rows %d, want 1", r.GetRows())
+	}
+	if n := e.count(t, `SELECT count(*) FROM abuse WHERE exempt AND purge_after <= now()`); n != 0 {
+		t.Fatalf("%d immediate rows exempted unchecked", n)
+	}
+}

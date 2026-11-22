@@ -208,13 +208,19 @@ func (s *Store) PublishBanned(h string) {
 // reports whether a pending purge was brought forward. Moving purge_after
 // first makes a failed publish one that Sync retries at its next pass instead
 // of after the delay.
+//
+// It also clears an exemption of h set through the Exempt RPC: an immediate
+// ban overrides one, and with every row of h now due, Exempt refuses h from
+// then on. One that Exempt sets before this UPDATE is cleared by it; one after
+// it is refused. An exemption set by hand is left alone.
 func (s *Store) PurgeNow(h string) (advanced bool) {
 	if h == "" {
 		return false
 	}
 	if pg := s.p.Get(); pg != nil {
 		now := time.Now()
-		r, err := pg.Exec(`UPDATE abuse SET purge_after = ? WHERE infohash = ? AND purge_after > ?`, now, h, now)
+		r, err := pg.Exec(`UPDATE abuse SET purge_after = ?, exempt = exempt AND NOT exempt_by_rpc, exempt_by_rpc = false
+			WHERE infohash = ? AND (purge_after > ? OR exempt AND exempt_by_rpc)`, now, h, now)
 		if err != nil {
 			log.WithError(err).WithField("infohash", h).Error("failed to bring purge forward")
 		} else {
@@ -298,10 +304,15 @@ func (s *Store) publish(h string) bool {
 	return true
 }
 
-// IsExempt reports whether the infohash was reviewed and exempted. It asks
-// Postgres, not the cache: Push is rare, and an exemption set by hand must
-// hold for the very next report, not after the next sync.
-func (s *Store) IsExempt(h string) (bool, error) {
+// IsExempt reports whether a report of the infohash is absorbed by an
+// exemption. It asks Postgres, not the cache: Push is rare, and an exemption
+// set by hand must hold for the very next report, not after the next sync.
+//
+// For an immediate ban (purge_now) only an exemption set by hand counts. One
+// set through the unauthenticated Exempt RPC gives way, and PurgeNow clears
+// it: otherwise a caller could report a hash, exempt it inside the window and
+// make it immune to the agents' CSAM bans.
+func (s *Store) IsExempt(h string, immediate bool) (bool, error) {
 	if h == "" {
 		return false, nil
 	}
@@ -309,7 +320,11 @@ func (s *Store) IsExempt(h string) (bool, error) {
 	if pg == nil {
 		return false, errors.New("database not initialized")
 	}
-	return pg.Model((*m.Abuse)(nil)).Where("infohash = ? AND exempt", h).Exists()
+	q := pg.Model((*m.Abuse)(nil)).Where("infohash = ? AND exempt", h)
+	if immediate {
+		q = q.Where("NOT exempt_by_rpc")
+	}
+	return q.Exists()
 }
 
 // Exempt sets exempt on every row of h and lifts its block at once, but only
@@ -354,7 +369,10 @@ func (s *Store) Exempt(ctx context.Context, h string) (int, error) {
 			return 0, ErrPurgeDue
 		}
 	}
-	r, err := tx.Exec(`UPDATE abuse SET exempt = true WHERE infohash = ? AND NOT exempt`, h)
+	// Only the rows checked above. One that landed while the read waited on a
+	// lock, an immediate ban say, is not in its window and stays non-exempt;
+	// the PurgeNow of its Push then clears this exemption.
+	r, err := tx.Exec(`UPDATE abuse SET exempt = true, exempt_by_rpc = true WHERE infohash = ? AND NOT exempt AND purge_after > ?`, h, now)
 	if err != nil {
 		return 0, err
 	}
@@ -456,8 +474,9 @@ func (s *Store) Push(a *m.Abuse) error {
 	defer s.mu.Unlock()
 	// Asked again under mu, where Exempt reloads the cache after its commit:
 	// a caller whose IsExempt read came before that commit would otherwise
-	// cache the infohash again, blocking it until the next sync.
-	if ex, err := s.IsExempt(a.Infohash); err != nil {
+	// cache the infohash again, blocking it until the next sync. A row with
+	// no purge delay is an immediate ban, as the caller asked.
+	if ex, err := s.IsExempt(a.Infohash, !a.PurgeAfter.After(time.Now())); err != nil {
 		return errors.Wrap(err, "failed to check exemption")
 	} else if ex {
 		return ErrExempt

@@ -1,0 +1,1 @@
+ALTER TABLE abuse DROP COLUMN IF EXISTS exempt_by_rpc;

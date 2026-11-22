@@ -1,0 +1,13 @@
+-- Which exemptions were set through the Exempt RPC.
+--
+-- The gRPC port has no authentication, and Exempt only reaches a ban still in
+-- its review window. But an exemption absorbs every later report of its
+-- infohash, so a caller could report a hash, exempt it inside the window, and
+-- make it immune to a later immediate (purge_now) ban, the agents' CSAM bans
+-- included. An exemption set through the RPC therefore gives way to an
+-- immediate ban: that Push stores its row, blocks, purges and clears the
+-- exemption. One set by hand (this column false) holds against every report.
+--
+-- To make an exemption set through the RPC hold against immediate bans too:
+--   UPDATE abuse SET exempt_by_rpc = false WHERE infohash = '<hash>';
+ALTER TABLE abuse ADD COLUMN exempt_by_rpc boolean NOT NULL DEFAULT false;

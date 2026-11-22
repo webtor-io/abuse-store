@@ -171,8 +171,9 @@ func (s *GRPC) Push(ctx context.Context, in *pb.PushRequest) (*pb.PushReply, err
 		// A reviewed, exempt infohash is not banned again: no row, no
 		// resource.banned purge. To the reporter it looks like any accepted
 		// report ("under moderation" in the letter); support gets the letter
-		// marked exempt, so every repeat request is seen.
-		nh.Exempt, err = s.store.IsExempt(h)
+		// marked exempt, so every repeat request is seen. An immediate ban
+		// overrides an exemption set through the Exempt RPC (IsExempt).
+		nh.Exempt, err = s.store.IsExempt(h, n.PurgeNow)
 		if err != nil {
 			return nil, errors.Wrap(err, "failed to check exemption")
 		}
