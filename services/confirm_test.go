@@ -228,6 +228,28 @@ func TestPGConfirmExpiredOrUnknown(t *testing.T) {
 	}
 }
 
+// Only the mailed spelling confirms. The others decode to the same token: CR
+// and LF anywhere, and the three other last characters that differ only in
+// the two bits past the token's 32 bytes.
+func TestPGConfirmTakesOnlyTheMailedSpelling(t *testing.T) {
+	e := newPGEnv(t, "72h")
+	tok := e.held(t, takedown(hashA))
+	const alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_"
+	last := strings.IndexByte(alphabet, tok[len(tok)-1])
+	variants := []string{tok[:10] + "\r\n" + tok[10:] + "\n", tok + "\n"}
+	for bits := 1; bits < 4; bits++ {
+		variants = append(variants, tok[:len(tok)-1]+string(alphabet[last^bits]))
+	}
+	for _, v := range variants {
+		if c := confirm(t, e.form, v); c.GetStatus() != pb.ConfirmReply_UNKNOWN {
+			t.Fatalf("%q: %v, want UNKNOWN", v, c)
+		}
+	}
+	if c := confirm(t, e.form, tok); c.GetStatus() != pb.ConfirmReply_CONFIRMED {
+		t.Fatalf("mailed token: %v, want CONFIRMED", c)
+	}
+}
+
 // Sync drops every notice past its expiry, confirmed or not, and keeps the
 // others: a confirmed one still answers ALREADY_CONFIRMED until then.
 func TestPGSyncDropsExpiredNotices(t *testing.T) {

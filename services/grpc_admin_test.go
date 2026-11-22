@@ -69,6 +69,19 @@ func TestSubjectCannotAddAHeader(t *testing.T) {
 	}
 }
 
+// A relay that accepted the data and then hangs up on QUIT has the letter: Send
+// succeeds, or a held notice would be dropped and its address's slot freed.
+func TestSendSucceedsOnceTheDataIsAccepted(t *testing.T) {
+	smtp, sink := newMailSink(t)
+	sink.dropQuit.Store(true)
+	if err := smtp.Send("noreply@example.com", "reporter@example.com", "", "subj", "body"); err != nil {
+		t.Fatalf("send: %v", err)
+	}
+	if n := len(sink.waitFor(t, 1)); n != 1 {
+		t.Fatalf("%d letters accepted, want 1", n)
+	}
+}
+
 // Push drops CR and LF from the subject and the notice id before they reach
 // the letters (and the table).
 func TestPushKeepsSubjectAndNoticeIDOnOneLine(t *testing.T) {

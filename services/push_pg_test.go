@@ -12,6 +12,7 @@ import (
 	"slices"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -410,6 +411,8 @@ func TestPGAlreadyExistsOnlyWhenAllExist(t *testing.T) {
 type mailSink struct {
 	mu   sync.Mutex
 	mail letters
+	// dropQuit hangs up on QUIT instead of answering 221.
+	dropQuit atomic.Bool
 }
 
 type letters []struct{ rcpt, body string }
@@ -493,6 +496,9 @@ func (k *mailSink) serve(c net.Conn) {
 			k.mu.Unlock()
 			_ = tp.PrintfLine("250 ok")
 		case cmd == "QUIT":
+			if k.dropQuit.Load() {
+				return
+			}
 			_ = tp.PrintfLine("221 bye")
 			return
 		default: // EHLO, MAIL FROM

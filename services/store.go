@@ -568,7 +568,10 @@ func (s *Store) AddUnconfirmed(ctx context.Context, tokenHash []byte, email stri
 		return time.Time{}, err
 	}
 	defer func() { _ = tx.Close() }()
-	// Self-conflicting; Confirm's row lock does not conflict with it.
+	// Self-conflicting, and every other writer of the table waits on it too:
+	// Confirm's claim and release, DropUnconfirmed, Sync's DELETE. Fine only
+	// while this transaction is just the count and the insert; mail sent
+	// inside it would stall every Confirm on every replica.
 	if _, err := tx.Exec(`LOCK TABLE unconfirmed_notice IN SHARE ROW EXCLUSIVE MODE`); err != nil {
 		return time.Time{}, err
 	}

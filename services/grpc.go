@@ -351,8 +351,12 @@ func (s *GRPC) askConfirmation(ctx context.Context, a *m.Abuse, hashes []string)
 // credential. A notice whose every hash got blocked meanwhile is confirmed
 // with no letters, as a repeat Push is AlreadyExists and silent.
 func (s *GRPC) Confirm(ctx context.Context, in *pb.ConfirmRequest) (*pb.ConfirmReply, error) {
-	// One that does not decode matches no stored hash: UNKNOWN.
+	// Only the spelling that was mailed: the decoder skips CR and LF and ignores
+	// the last character's two spare bits, so other spellings decode to it too.
 	tok, _ := base64.RawURLEncoding.DecodeString(in.GetToken())
+	if base64.RawURLEncoding.EncodeToString(tok) != in.GetToken() {
+		return &pb.ConfirmReply{Status: pb.ConfirmReply_UNKNOWN}, nil
+	}
 	th := sha256.Sum256(tok)
 	var p pendingNotice
 	var n *Notice
