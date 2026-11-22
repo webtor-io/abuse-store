@@ -4,9 +4,13 @@ import (
 	"context"
 	"strings"
 	"testing"
+	"time"
 
+	log "github.com/sirupsen/logrus"
+	logtest "github.com/sirupsen/logrus/hooks/test"
 	"github.com/urfave/cli"
 	pb "github.com/webtor-io/abuse-store/proto"
+	cs "github.com/webtor-io/common-services"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 )
@@ -79,4 +83,23 @@ func TestPushKeepsSubjectAndNoticeIDOnOneLine(t *testing.T) {
 	if l.subject != "[nX-Evil: 1] hiBcc: evil@example.com" || strings.ContainsAny(l.subject, "\r\n") {
 		t.Fatalf("subject %q", l.subject)
 	}
+}
+
+// purge_now on the public port is logged with every infohash of the notice:
+// the only trace of a ban whose purge was meant to be immediate. (No database
+// here, so Push fails after the warning.)
+func TestPublicPortLogsIgnoredPurgeNow(t *testing.T) {
+	hook := logtest.NewGlobal()
+	t.Cleanup(func() { log.StandardLogger().ReplaceHooks(make(log.LevelHooks)) })
+	g := &GRPC{store: &Store{p: &cs.PG{}, pd: time.Hour}}
+	_, _ = g.Push(context.Background(), &pb.PushRequest{Infohash: hashA, ExtraInfohashes: []string{hashB}, PurgeNow: true})
+	for _, e := range hook.AllEntries() {
+		if e.Message == "purge_now ignored on the public port" {
+			if e.Level != log.WarnLevel || e.Data["infohash"] != hashA+","+hashB {
+				t.Fatalf("warning %v with fields %v, want warn with infohash=%s,%s", e.Level, e.Data, hashA, hashB)
+			}
+			return
+		}
+	}
+	t.Fatal("purge_now on the public port not logged")
 }

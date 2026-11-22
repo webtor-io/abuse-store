@@ -536,3 +536,27 @@ func TestPGExemptMailsWhenTheReloadFails(t *testing.T) {
 		t.Fatalf("support letter subject %q, want the exempt one", s)
 	}
 }
+
+// The commit itself fails (a deferred trigger on clearing the exemption
+// raises then): nothing of the immediate ban stays, its row included, so the
+// row cannot have been written outside the transaction.
+func TestPGImmediateBanFailingAtCommitLeavesNothing(t *testing.T) {
+	e := newPGEnv(t, "72h")
+	e.exec(t, `INSERT INTO abuse (infohash, exempt) VALUES (?, true)`, hashA)
+	e.exec(t, `CREATE FUNCTION refuse() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'refused'; END $$`)
+	t.Cleanup(func() { e.exec(t, `DROP FUNCTION refuse() CASCADE`) })
+	e.exec(t, `CREATE CONSTRAINT TRIGGER refuse AFTER UPDATE ON abuse DEFERRABLE INITIALLY DEFERRED
+		FOR EACH ROW WHEN (OLD.exempt AND NOT NEW.exempt) EXECUTE FUNCTION refuse()`)
+	if _, err := e.g.Push(context.Background(), &pb.PushRequest{Infohash: hashA, PurgeNow: true}); err == nil {
+		t.Fatal("immediate ban succeeded although its commit failed")
+	}
+	if n := e.count(t, `SELECT count(*) FROM abuse`); n != 1 {
+		t.Fatalf("%d rows, want the exempt one only", n)
+	}
+	if n := e.count(t, `SELECT count(*) FROM abuse WHERE exempt`); n != 1 {
+		t.Fatalf("%d exempt rows, want the exemption to stand", n)
+	}
+	if blocked(t, e.s, hashA, nil) || len(e.banned()) != 0 {
+		t.Fatal("an immediate ban whose commit failed blocked or published")
+	}
+}
