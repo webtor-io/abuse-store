@@ -310,9 +310,18 @@ func (s *Store) Exempt(ctx context.Context, h string) (int, error) {
 	if len(rows) == 0 {
 		return 0, ErrNotFound
 	}
-	// The same clock and rule as dueInfohashes, so what Sync would publish
-	// is exactly what is refused.
+	// The rule of dueInfohashes, by the later of two clocks: ours, and the
+	// database's for a row it timestamped (a hand INSERT with now()). With
+	// only ours, a database clock a few ms ahead made a just-written immediate
+	// row look pending, and it was exempted.
 	now := time.Now()
+	var dbNow time.Time
+	if _, err := tx.QueryOne(pg.Scan(&dbNow), `SELECT clock_timestamp()`); err != nil {
+		return 0, err
+	}
+	if dbNow.After(now) {
+		now = dbNow
+	}
 	ids := make([]string, 0, len(rows))
 	for _, a := range rows {
 		if !a.Exempt && !a.PurgeAfter.After(now) {
