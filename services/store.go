@@ -23,6 +23,8 @@ const (
 
 var (
 	ErrNotFound = errors.New("store: abuse not found")
+	// ErrPurgeDue is Exempt refusing an infohash outside its review window.
+	ErrPurgeDue = errors.New("store: purge due, not in the review window")
 )
 
 // fingerprintSize is the length of a SHA-256 digest. Values of any other
@@ -304,6 +306,67 @@ func (s *Store) IsExempt(h string) (bool, error) {
 		return false, errors.New("database not initialized")
 	}
 	return pg.Model((*m.Abuse)(nil)).Where("infohash = ? AND exempt", h).Exists()
+}
+
+// Exempt sets exempt on every row of h and lifts its block at once, but only
+// while the ban is in its review window: h has rows, and every non-exempt one
+// has a purge_after still ahead. An immediate purge (purge_now: the agent's
+// bans), a row from before the delay (NULL) or a purge already due is
+// ErrPurgeDue; no rows is ErrNotFound. The caller is unauthenticated, so
+// these bans are left to a hand UPDATE in Postgres. Returns the rows changed,
+// 0 when h was already exempt.
+//
+// It holds mu like Push and Sync: a Sync that read the table before the
+// UPDATE would otherwise put h back in the cache for a whole interval.
+func (s *Store) Exempt(h string) (int, error) {
+	db := s.p.Get()
+	if db == nil {
+		return 0, errors.New("database not initialized")
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	tx, err := db.Begin()
+	if err != nil {
+		return 0, err
+	}
+	defer func() { _ = tx.Close() }()
+	// FOR UPDATE: a purge_now bringing purge_after forward (PurgeNow does not
+	// take mu, and may run on another replica) either lands before this read,
+	// and is refused, or waits for the commit.
+	var rows []*m.Abuse
+	if err := tx.Model(&rows).Where("infohash = ?", h).For("UPDATE").Select(); err != nil {
+		return 0, err
+	}
+	if len(rows) == 0 {
+		return 0, ErrNotFound
+	}
+	// The same clock and rule as dueInfohashes, so what Sync would publish
+	// is exactly what is refused.
+	now := time.Now()
+	for _, a := range rows {
+		if !a.Exempt && !a.PurgeAfter.After(now) {
+			return 0, ErrPurgeDue
+		}
+	}
+	r, err := tx.Exec(`UPDATE abuse SET exempt = true WHERE infohash = ? AND NOT exempt`, h)
+	if err != nil {
+		return 0, err
+	}
+	if err := tx.Commit(); err != nil {
+		return 0, err
+	}
+	// The cache half of Sync on a fresh read, also when nothing changed, so a
+	// retry repairs a failed one. Deleting only h's key would leave the
+	// fingerprint of its row blocking the payload until the next sync.
+	var all []*m.Abuse
+	if err := db.Model(&all).Select(); err != nil {
+		return r.RowsAffected(), errors.Wrap(err, "exempted, but failed to reload the cache")
+	}
+	keep, _, _, _ := s.load(all)
+	if _, err := s.prune(keep); err != nil {
+		return r.RowsAffected(), errors.Wrap(err, "exempted, but failed to prune the cache")
+	}
+	return r.RowsAffected(), nil
 }
 
 // prune deletes every cached key not in keep and reports how many it removed.

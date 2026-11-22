@@ -1,0 +1,182 @@
+package services
+
+import (
+	"context"
+	"slices"
+	"strings"
+	"testing"
+	"time"
+
+	pb "github.com/webtor-io/abuse-store/proto"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
+)
+
+// Against Postgres and NATS like push_pg_test.go; same env, same skip.
+
+func (e *pgEnv) exempt(t *testing.T, h string) (int32, codes.Code) {
+	t.Helper()
+	r, err := e.g.Exempt(context.Background(), &pb.ExemptRequest{Infohash: h, Reason: "reviewed"})
+	return r.GetRows(), status.Code(err)
+}
+
+// Inside the window: OK, the block lifts at once on both arms with no Sync,
+// no letter, and once the purge time passes Sync publishes nothing. The
+// unreviewed ban next to it shows the purge would have gone out.
+func TestPGExemptInsideTheWindow(t *testing.T) {
+	e := newPGEnv(t, "72h")
+	fp := digest(0x51)
+	e.push(t, &pb.PushRequest{Infohash: hashA, Fingerprint: fp})
+	e.push(t, &pb.PushRequest{Infohash: hashB})
+	e.sink.waitFor(t, 4)
+	e.sink.reset()
+
+	if rows, c := e.exempt(t, strings.ToUpper(hashA)); c != codes.OK || rows != 1 {
+		t.Fatalf("exempt: rows %d, %v; want 1, OK", rows, c)
+	}
+	if blocked(t, e.s, hashA, nil) {
+		t.Fatal("still blocked by infohash right after Exempt")
+	}
+	if blocked(t, e.s, "", fp) {
+		t.Fatal("still blocked by the row's fingerprint right after Exempt")
+	}
+	if rows, c := e.exempt(t, hashA); c != codes.OK || rows != 0 {
+		t.Fatalf("repeat: rows %d, %v; want 0, OK", rows, c)
+	}
+	if mail := e.sink.waitFor(t, 0); len(mail) != 0 {
+		t.Fatalf("%d letters for Exempt", len(mail))
+	}
+
+	e.exec(t, `UPDATE abuse SET purge_after = now() - interval '1 second'`)
+	e.sync(t)
+	e.sync(t)
+	if got := e.banned(); !slices.Equal(got, []string{hashB}) {
+		t.Fatalf("published %v, want only the unreviewed %s", got, hashB)
+	}
+	if blocked(t, e.s, hashA, nil) {
+		t.Fatal("blocked again after Sync")
+	}
+}
+
+// Outside the window the RPC refuses and the ban stays exactly as it was.
+func TestPGExemptRefusedOutsideTheWindow(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		setup func(t *testing.T, e *pgEnv)
+	}{
+		{"purge_now", func(t *testing.T, e *pgEnv) {
+			e.push(t, &pb.PushRequest{Infohash: hashA, PurgeNow: true})
+		}},
+		{"one pending, one immediate row", func(t *testing.T, e *pgEnv) {
+			e.push(t, &pb.PushRequest{Infohash: hashA})
+			e.exec(t, `INSERT INTO abuse (infohash, purge_after) VALUES (?, now())`, hashA)
+		}},
+		{"purge_after NULL", func(t *testing.T, e *pgEnv) {
+			e.exec(t, `INSERT INTO abuse (infohash) VALUES (?)`, hashA)
+			e.sync(t)
+		}},
+		{"purge_after passed", func(t *testing.T, e *pgEnv) {
+			e.push(t, &pb.PushRequest{Infohash: hashA})
+			e.exec(t, `UPDATE abuse SET purge_after = now() - interval '1 second'`)
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			e := newPGEnv(t, "72h")
+			tc.setup(t, e)
+			if _, c := e.exempt(t, hashA); c != codes.FailedPrecondition {
+				t.Fatalf("exempt: %v, want FailedPrecondition", c)
+			}
+			if n := e.count(t, `SELECT count(*) FROM abuse WHERE exempt`); n != 0 {
+				t.Fatalf("%d rows set exempt", n)
+			}
+			if !blocked(t, e.s, hashA, nil) {
+				t.Fatal("unblocked by a refused Exempt")
+			}
+			e.sync(t)
+			if !blocked(t, e.s, hashA, nil) {
+				t.Fatal("unblocked after Sync")
+			}
+		})
+	}
+}
+
+// Unknown is NotFound; a malformed or empty infohash is refused before it
+// reaches the table.
+func TestPGExemptUnknownAndMalformed(t *testing.T) {
+	e := newPGEnv(t, "72h")
+	if _, c := e.exempt(t, hashC); c != codes.NotFound {
+		t.Fatalf("unknown: %v, want NotFound", c)
+	}
+	for _, h := range []string{"", "  ", "abc", hashA + "0"} {
+		if _, c := e.exempt(t, h); c != codes.InvalidArgument {
+			t.Errorf("%q: %v, want InvalidArgument", h, c)
+		}
+	}
+}
+
+// An exempt row inserted by hand has no purge_after; it is not a ban, so the
+// hash is already fully exempt rather than outside the window.
+func TestPGExemptAlreadyExemptByHand(t *testing.T) {
+	e := newPGEnv(t, "72h")
+	e.exec(t, `INSERT INTO abuse (infohash, exempt) VALUES (?, true)`, hashA)
+	if rows, c := e.exempt(t, hashA); c != codes.OK || rows != 0 {
+		t.Fatalf("exempt: rows %d, %v; want 0, OK", rows, c)
+	}
+}
+
+// A purge brought forward while Exempt runs (PurgeNow, here held open in a
+// transaction): Exempt waits for it, sees the new purge_after and refuses,
+// instead of exempting a hash whose purge has just gone out.
+func TestPGExemptWaitsForAPurgeBroughtForward(t *testing.T) {
+	e := newPGEnv(t, "72h")
+	e.push(t, &pb.PushRequest{Infohash: hashA})
+	tx, err := e.s.p.Get().Begin()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = tx.Close() }()
+	if _, err := tx.Exec(`UPDATE abuse SET purge_after = now() WHERE infohash = ?`, hashA); err != nil {
+		t.Fatal(err)
+	}
+	done := make(chan codes.Code, 1)
+	go func() {
+		_, err := e.g.Exempt(context.Background(), &pb.ExemptRequest{Infohash: hashA})
+		done <- status.Code(err)
+	}()
+	time.Sleep(300 * time.Millisecond)
+	if err := tx.Commit(); err != nil {
+		t.Fatal(err)
+	}
+	if c := <-done; c != codes.FailedPrecondition {
+		t.Fatalf("exempt racing a purge brought forward: %v, want FailedPrecondition", c)
+	}
+}
+
+// Exempt waits for the lock Push and Sync hold: a Sync that read the table
+// before the UPDATE must finish before the cache is touched, or its stale
+// rows put the hash back.
+func TestPGExemptTakesTheStoreLock(t *testing.T) {
+	e := newPGEnv(t, "72h")
+	e.push(t, &pb.PushRequest{Infohash: hashA})
+	e.s.mu.Lock()
+	done := make(chan codes.Code, 1)
+	go func() {
+		_, err := e.g.Exempt(context.Background(), &pb.ExemptRequest{Infohash: hashA})
+		done <- status.Code(err)
+	}()
+	select {
+	case c := <-done:
+		e.s.mu.Unlock()
+		t.Fatalf("Exempt returned %v while the store lock was held", c)
+	case <-time.After(300 * time.Millisecond):
+	}
+	e.s.mu.Unlock()
+	select {
+	case c := <-done:
+		if c != codes.OK {
+			t.Fatalf("exempt: %v", c)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("Exempt did not return after the lock was released")
+	}
+}

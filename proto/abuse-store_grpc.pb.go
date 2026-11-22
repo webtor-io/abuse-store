@@ -19,8 +19,9 @@ import (
 const _ = grpc.SupportPackageIsVersion9
 
 const (
-	AbuseStore_Push_FullMethodName  = "/AbuseStore/Push"
-	AbuseStore_Check_FullMethodName = "/AbuseStore/Check"
+	AbuseStore_Push_FullMethodName   = "/AbuseStore/Push"
+	AbuseStore_Check_FullMethodName  = "/AbuseStore/Check"
+	AbuseStore_Exempt_FullMethodName = "/AbuseStore/Exempt"
 )
 
 // AbuseStoreClient is the client API for AbuseStore service.
@@ -31,6 +32,11 @@ type AbuseStoreClient interface {
 	Push(ctx context.Context, in *PushRequest, opts ...grpc.CallOption) (*PushReply, error)
 	// Check abuse in the store for existence
 	Check(ctx context.Context, in *CheckRequest, opts ...grpc.CallOption) (*CheckReply, error)
+	// Exempts an infohash whose ban is still in its review window: every
+	// non-exempt row waits for a purge that has not come yet. Anything else
+	// (an immediate purge, a row from before the delay, a purge already due)
+	// is FAILED_PRECONDITION; an unknown infohash is NOT_FOUND.
+	Exempt(ctx context.Context, in *ExemptRequest, opts ...grpc.CallOption) (*ExemptReply, error)
 }
 
 type abuseStoreClient struct {
@@ -61,6 +67,16 @@ func (c *abuseStoreClient) Check(ctx context.Context, in *CheckRequest, opts ...
 	return out, nil
 }
 
+func (c *abuseStoreClient) Exempt(ctx context.Context, in *ExemptRequest, opts ...grpc.CallOption) (*ExemptReply, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(ExemptReply)
+	err := c.cc.Invoke(ctx, AbuseStore_Exempt_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 // AbuseStoreServer is the server API for AbuseStore service.
 // All implementations must embed UnimplementedAbuseStoreServer
 // for forward compatibility.
@@ -69,6 +85,11 @@ type AbuseStoreServer interface {
 	Push(context.Context, *PushRequest) (*PushReply, error)
 	// Check abuse in the store for existence
 	Check(context.Context, *CheckRequest) (*CheckReply, error)
+	// Exempts an infohash whose ban is still in its review window: every
+	// non-exempt row waits for a purge that has not come yet. Anything else
+	// (an immediate purge, a row from before the delay, a purge already due)
+	// is FAILED_PRECONDITION; an unknown infohash is NOT_FOUND.
+	Exempt(context.Context, *ExemptRequest) (*ExemptReply, error)
 	mustEmbedUnimplementedAbuseStoreServer()
 }
 
@@ -84,6 +105,9 @@ func (UnimplementedAbuseStoreServer) Push(context.Context, *PushRequest) (*PushR
 }
 func (UnimplementedAbuseStoreServer) Check(context.Context, *CheckRequest) (*CheckReply, error) {
 	return nil, status.Error(codes.Unimplemented, "method Check not implemented")
+}
+func (UnimplementedAbuseStoreServer) Exempt(context.Context, *ExemptRequest) (*ExemptReply, error) {
+	return nil, status.Error(codes.Unimplemented, "method Exempt not implemented")
 }
 func (UnimplementedAbuseStoreServer) mustEmbedUnimplementedAbuseStoreServer() {}
 func (UnimplementedAbuseStoreServer) testEmbeddedByValue()                    {}
@@ -142,6 +166,24 @@ func _AbuseStore_Check_Handler(srv interface{}, ctx context.Context, dec func(in
 	return interceptor(ctx, in, info, handler)
 }
 
+func _AbuseStore_Exempt_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(ExemptRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(AbuseStoreServer).Exempt(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: AbuseStore_Exempt_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(AbuseStoreServer).Exempt(ctx, req.(*ExemptRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 // AbuseStore_ServiceDesc is the grpc.ServiceDesc for AbuseStore service.
 // It's only intended for direct use with grpc.RegisterService,
 // and not to be introspected or modified (even as a copy)
@@ -156,6 +198,10 @@ var AbuseStore_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "Check",
 			Handler:    _AbuseStore_Check_Handler,
+		},
+		{
+			MethodName: "Exempt",
+			Handler:    _AbuseStore_Exempt_Handler,
 		},
 	},
 	Streams:  []grpc.StreamDesc{},

@@ -205,6 +205,42 @@ func newApp() *cli.App {
 				return nil
 			},
 		},
+		{
+			Name:  "exempt",
+			Usage: "exempts an infohash whose ban is still in its review window; prints the rows changed",
+			Flags: []cli.Flag{
+				cli.StringFlag{
+					Name:  "infohash, hash, ha",
+					Usage: "info hash of the torrent",
+				},
+				cli.StringFlag{
+					Name:  "reason",
+					Usage: "why, for the server log",
+				},
+			},
+			Action: func(c *cli.Context) error {
+				addr := fmt.Sprintf("%s:%d", c.GlobalString("host"), c.GlobalInt("port"))
+				conn, err := grpc.Dial(addr, grpc.WithInsecure())
+				if err != nil {
+					return err
+				}
+				defer conn.Close()
+				cl := pb.NewAbuseStoreClient(conn)
+
+				ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
+				defer cancel()
+				r, err := cl.Exempt(ctx, &pb.ExemptRequest{
+					Infohash: c.String("infohash"),
+					Reason:   c.String("reason"),
+				})
+				if err != nil {
+					return err
+				}
+				fmt.Println(r.Rows)
+
+				return nil
+			},
+		},
 	}
 	return app
 }

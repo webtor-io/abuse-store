@@ -26,7 +26,8 @@ gRPC client ──► Push / Check  ─┬─► PostgreSQL  (source of truth, p
 Defined in [`proto/abuse-store.proto`](proto/abuse-store.proto):
 
 - `Push(PushRequest) → PushReply` — submit an abuse notice naming `infohash` and, optionally, more `extra_infohashes`. Each hash must be a full 40-character hex infohash (case and surrounding whitespace are normalized), repeats are dropped, `email` is validated; `notice_id` and `started_at` default to a fresh UUID and the current time. Only `ILLEGAL_CONTENT` causes a database write: one row per hash not yet blocked, under the same `notice_id`, purged after `--purge-delay` — or at once with `purge_now = true`, which also brings forward a pending purge of an already-blocked hash. A notice whose every hash is already blocked, and that brought no pending purge forward, is rejected with `ALREADY_EXISTS` and mailed to no one; a repeat report without `purge_now` publishes nothing. A hash marked `exempt` in the table is mailed as usual (the reporter is told it is under moderation, support sees it marked `[exempt]`) but is neither stored nor fanned out. One letter goes to support and at most one to the reporter per notice, listing every hash.
-- `Check(CheckRequest) → CheckReply` — returns `exists = true` if the infohash is in the stoplist (Badger lookup). Deleting a row or setting `exempt = true` lifts the block at the next sync.
+- `Check(CheckRequest) → CheckReply` — returns `exists = true` if the infohash is in the stoplist (Badger lookup). Deleting a row or setting `exempt = true` lifts the block at the next sync; `Exempt` lifts it at once.
+- `Exempt(ExemptRequest) → ExemptReply` — sets `exempt` on every row of `infohash`, but only while its ban is in the review window: it has rows, and every non-exempt one has a `purge_after` still ahead. The block lifts at once on the replica that serves the call, fingerprint included (other replicas follow at their next sync), and the purge never goes out. `rows` is the number of rows changed, 0 if the hash was already exempt. A `purge_now` ban, a row from before the purge delay (`purge_after` NULL) or a ban whose purge is due is refused with `FAILED_PRECONDITION`; an unknown hash is `NOT_FOUND`. The guard is there because the gRPC port has no authentication: anything in the cluster can call it, and that must never unban an immediate ban (the CSAM ban script sends `purge_now`) or one whose data is already gone. Those are exempted by hand in the database. `reason` goes to the server log; no mail is sent.
 
 ## NATS events
 
@@ -41,7 +42,7 @@ The platform's JetStream stream `common` captures `resource.*`, so any consumer 
 - `web-ui` — drops the resource from `library`, `watch_history`, `cache_index`, `torrent_resource`, media metadata and the `vault.pledge` / `vault.tx_log` / `vault.resource` tables (refunding VP).
 - `vault` — queues the resource for deletion (S3 + own DB) via `ResourceQueueForDeletion`.
 
-Publishing is best-effort and never fails the RPC. Consumers must be idempotent — a `purge_now` repeat re-fires the event. Each periodic sync publishes every blocking infohash that is due (a row with `purge_after` NULL or passed) and not yet recorded in `banned_published`, and forgets the ones that stopped blocking, so a delayed ban, a failed publish, a row inserted by hand, or an exemption lifted (`exempt` back to false) is fanned out within one `--sync-interval` of being due. Setting `exempt` or deleting the row before `purge_after` cancels the automatic purge; web-ui's manual metadata backfill, if run meanwhile, can still remove the data.
+Publishing is best-effort and never fails the RPC. Consumers must be idempotent — a `purge_now` repeat re-fires the event. Each periodic sync publishes every blocking infohash that is due (a row with `purge_after` NULL or passed) and not yet recorded in `banned_published`, and forgets the ones that stopped blocking, so a delayed ban, a failed publish, a row inserted by hand, or an exemption lifted (`exempt` back to false) is fanned out within one `--sync-interval` of being due. Setting `exempt` (by hand or with `Exempt`) or deleting the row before `purge_after` cancels the automatic purge; web-ui's manual metadata backfill, if run meanwhile, can still remove the data.
 
 ## Build & run
 
@@ -94,6 +95,9 @@ go run ./client --host 127.0.0.1 --port 50051 push \
 #       --subject, --started-at (RFC 3339 or unix seconds), --notice-id, --fingerprint
 
 go run ./client --host 127.0.0.1 --port 50051 check --hash <infohash>
+
+go run ./client -H 127.0.0.1 -P 50051 exempt --hash <infohash> --reason "..."
+# prints the rows set exempt; exits 1 with the gRPC error (code = FailedPrecondition / NotFound) otherwise
 ```
 
 ## Migrations

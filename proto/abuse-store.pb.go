@@ -70,7 +70,7 @@ func (x PushRequest_Cause) Number() protoreflect.EnumNumber {
 
 // Deprecated: Use PushRequest_Cause.Descriptor instead.
 func (PushRequest_Cause) EnumDescriptor() ([]byte, []int) {
-	return file_proto_abuse_store_proto_rawDescGZIP(), []int{1, 0}
+	return file_proto_abuse_store_proto_rawDescGZIP(), []int{3, 0}
 }
 
 type PushRequest_Source int32
@@ -116,7 +116,105 @@ func (x PushRequest_Source) Number() protoreflect.EnumNumber {
 
 // Deprecated: Use PushRequest_Source.Descriptor instead.
 func (PushRequest_Source) EnumDescriptor() ([]byte, []int) {
-	return file_proto_abuse_store_proto_rawDescGZIP(), []int{1, 1}
+	return file_proto_abuse_store_proto_rawDescGZIP(), []int{3, 1}
+}
+
+type ExemptRequest struct {
+	state    protoimpl.MessageState `protogen:"open.v1"`
+	Infohash string                 `protobuf:"bytes,1,opt,name=infohash,proto3" json:"infohash,omitempty"`
+	// Why, for the server log.
+	Reason        string `protobuf:"bytes,2,opt,name=reason,proto3" json:"reason,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *ExemptRequest) Reset() {
+	*x = ExemptRequest{}
+	mi := &file_proto_abuse_store_proto_msgTypes[0]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *ExemptRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ExemptRequest) ProtoMessage() {}
+
+func (x *ExemptRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_proto_abuse_store_proto_msgTypes[0]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ExemptRequest.ProtoReflect.Descriptor instead.
+func (*ExemptRequest) Descriptor() ([]byte, []int) {
+	return file_proto_abuse_store_proto_rawDescGZIP(), []int{0}
+}
+
+func (x *ExemptRequest) GetInfohash() string {
+	if x != nil {
+		return x.Infohash
+	}
+	return ""
+}
+
+func (x *ExemptRequest) GetReason() string {
+	if x != nil {
+		return x.Reason
+	}
+	return ""
+}
+
+// rows is how many rows were set exempt; 0 when the infohash already was.
+type ExemptReply struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Rows          int32                  `protobuf:"varint,1,opt,name=rows,proto3" json:"rows,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *ExemptReply) Reset() {
+	*x = ExemptReply{}
+	mi := &file_proto_abuse_store_proto_msgTypes[1]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *ExemptReply) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ExemptReply) ProtoMessage() {}
+
+func (x *ExemptReply) ProtoReflect() protoreflect.Message {
+	mi := &file_proto_abuse_store_proto_msgTypes[1]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ExemptReply.ProtoReflect.Descriptor instead.
+func (*ExemptReply) Descriptor() ([]byte, []int) {
+	return file_proto_abuse_store_proto_rawDescGZIP(), []int{1}
+}
+
+func (x *ExemptReply) GetRows() int32 {
+	if x != nil {
+		return x.Rows
+	}
+	return 0
 }
 
 // The push response message containing
@@ -128,7 +226,7 @@ type PushReply struct {
 
 func (x *PushReply) Reset() {
 	*x = PushReply{}
-	mi := &file_proto_abuse_store_proto_msgTypes[0]
+	mi := &file_proto_abuse_store_proto_msgTypes[2]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -140,7 +238,7 @@ func (x *PushReply) String() string {
 func (*PushReply) ProtoMessage() {}
 
 func (x *PushReply) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_abuse_store_proto_msgTypes[0]
+	mi := &file_proto_abuse_store_proto_msgTypes[2]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -153,7 +251,7 @@ func (x *PushReply) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use PushReply.ProtoReflect.Descriptor instead.
 func (*PushReply) Descriptor() ([]byte, []int) {
-	return file_proto_abuse_store_proto_rawDescGZIP(), []int{0}
+	return file_proto_abuse_store_proto_rawDescGZIP(), []int{2}
 }
 
 // The push request message
@@ -189,7 +287,7 @@ type PushRequest struct {
 
 func (x *PushRequest) Reset() {
 	*x = PushRequest{}
-	mi := &file_proto_abuse_store_proto_msgTypes[1]
+	mi := &file_proto_abuse_store_proto_msgTypes[3]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -201,7 +299,7 @@ func (x *PushRequest) String() string {
 func (*PushRequest) ProtoMessage() {}
 
 func (x *PushRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_abuse_store_proto_msgTypes[1]
+	mi := &file_proto_abuse_store_proto_msgTypes[3]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -214,7 +312,7 @@ func (x *PushRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use PushRequest.ProtoReflect.Descriptor instead.
 func (*PushRequest) Descriptor() ([]byte, []int) {
-	return file_proto_abuse_store_proto_rawDescGZIP(), []int{1}
+	return file_proto_abuse_store_proto_rawDescGZIP(), []int{3}
 }
 
 func (x *PushRequest) GetNoticeId() string {
@@ -322,7 +420,7 @@ type CheckRequest struct {
 
 func (x *CheckRequest) Reset() {
 	*x = CheckRequest{}
-	mi := &file_proto_abuse_store_proto_msgTypes[2]
+	mi := &file_proto_abuse_store_proto_msgTypes[4]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -334,7 +432,7 @@ func (x *CheckRequest) String() string {
 func (*CheckRequest) ProtoMessage() {}
 
 func (x *CheckRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_abuse_store_proto_msgTypes[2]
+	mi := &file_proto_abuse_store_proto_msgTypes[4]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -347,7 +445,7 @@ func (x *CheckRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use CheckRequest.ProtoReflect.Descriptor instead.
 func (*CheckRequest) Descriptor() ([]byte, []int) {
-	return file_proto_abuse_store_proto_rawDescGZIP(), []int{2}
+	return file_proto_abuse_store_proto_rawDescGZIP(), []int{4}
 }
 
 func (x *CheckRequest) GetInfohash() string {
@@ -374,7 +472,7 @@ type CheckReply struct {
 
 func (x *CheckReply) Reset() {
 	*x = CheckReply{}
-	mi := &file_proto_abuse_store_proto_msgTypes[3]
+	mi := &file_proto_abuse_store_proto_msgTypes[5]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -386,7 +484,7 @@ func (x *CheckReply) String() string {
 func (*CheckReply) ProtoMessage() {}
 
 func (x *CheckReply) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_abuse_store_proto_msgTypes[3]
+	mi := &file_proto_abuse_store_proto_msgTypes[5]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -399,7 +497,7 @@ func (x *CheckReply) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use CheckReply.ProtoReflect.Descriptor instead.
 func (*CheckReply) Descriptor() ([]byte, []int) {
-	return file_proto_abuse_store_proto_rawDescGZIP(), []int{3}
+	return file_proto_abuse_store_proto_rawDescGZIP(), []int{5}
 }
 
 func (x *CheckReply) GetExists() bool {
@@ -413,7 +511,12 @@ var File_proto_abuse_store_proto protoreflect.FileDescriptor
 
 const file_proto_abuse_store_proto_rawDesc = "" +
 	"\n" +
-	"\x17proto/abuse-store.proto\"\v\n" +
+	"\x17proto/abuse-store.proto\"C\n" +
+	"\rExemptRequest\x12\x1a\n" +
+	"\binfohash\x18\x01 \x01(\tR\binfohash\x12\x16\n" +
+	"\x06reason\x18\x02 \x01(\tR\x06reason\"!\n" +
+	"\vExemptReply\x12\x12\n" +
+	"\x04rows\x18\x01 \x01(\x05R\x04rows\"\v\n" +
 	"\tPushReply\"\x8e\x04\n" +
 	"\vPushRequest\x12\x1b\n" +
 	"\tnotice_id\x18\x01 \x01(\tR\bnoticeId\x12\x1a\n" +
@@ -444,12 +547,13 @@ const file_proto_abuse_store_proto_rawDesc = "" +
 	"\vfingerprint\x18\x02 \x01(\fR\vfingerprint\"$\n" +
 	"\n" +
 	"CheckReply\x12\x16\n" +
-	"\x06exists\x18\x01 \x01(\bR\x06exists2W\n" +
+	"\x06exists\x18\x01 \x01(\bR\x06exists2\x81\x01\n" +
 	"\n" +
 	"AbuseStore\x12\"\n" +
 	"\x04Push\x12\f.PushRequest\x1a\n" +
 	".PushReply\"\x00\x12%\n" +
-	"\x05Check\x12\r.CheckRequest\x1a\v.CheckReply\"\x00B\x04Z\x02./b\x06proto3"
+	"\x05Check\x12\r.CheckRequest\x1a\v.CheckReply\"\x00\x12(\n" +
+	"\x06Exempt\x12\x0e.ExemptRequest\x1a\f.ExemptReply\"\x00B\x04Z\x02./b\x06proto3"
 
 var (
 	file_proto_abuse_store_proto_rawDescOnce sync.Once
@@ -464,24 +568,28 @@ func file_proto_abuse_store_proto_rawDescGZIP() []byte {
 }
 
 var file_proto_abuse_store_proto_enumTypes = make([]protoimpl.EnumInfo, 2)
-var file_proto_abuse_store_proto_msgTypes = make([]protoimpl.MessageInfo, 4)
+var file_proto_abuse_store_proto_msgTypes = make([]protoimpl.MessageInfo, 6)
 var file_proto_abuse_store_proto_goTypes = []any{
 	(PushRequest_Cause)(0),  // 0: PushRequest.Cause
 	(PushRequest_Source)(0), // 1: PushRequest.Source
-	(*PushReply)(nil),       // 2: PushReply
-	(*PushRequest)(nil),     // 3: PushRequest
-	(*CheckRequest)(nil),    // 4: CheckRequest
-	(*CheckReply)(nil),      // 5: CheckReply
+	(*ExemptRequest)(nil),   // 2: ExemptRequest
+	(*ExemptReply)(nil),     // 3: ExemptReply
+	(*PushReply)(nil),       // 4: PushReply
+	(*PushRequest)(nil),     // 5: PushRequest
+	(*CheckRequest)(nil),    // 6: CheckRequest
+	(*CheckReply)(nil),      // 7: CheckReply
 }
 var file_proto_abuse_store_proto_depIdxs = []int32{
 	0, // 0: PushRequest.cause:type_name -> PushRequest.Cause
 	1, // 1: PushRequest.source:type_name -> PushRequest.Source
-	3, // 2: AbuseStore.Push:input_type -> PushRequest
-	4, // 3: AbuseStore.Check:input_type -> CheckRequest
-	2, // 4: AbuseStore.Push:output_type -> PushReply
-	5, // 5: AbuseStore.Check:output_type -> CheckReply
-	4, // [4:6] is the sub-list for method output_type
-	2, // [2:4] is the sub-list for method input_type
+	5, // 2: AbuseStore.Push:input_type -> PushRequest
+	6, // 3: AbuseStore.Check:input_type -> CheckRequest
+	2, // 4: AbuseStore.Exempt:input_type -> ExemptRequest
+	4, // 5: AbuseStore.Push:output_type -> PushReply
+	7, // 6: AbuseStore.Check:output_type -> CheckReply
+	3, // 7: AbuseStore.Exempt:output_type -> ExemptReply
+	5, // [5:8] is the sub-list for method output_type
+	2, // [2:5] is the sub-list for method input_type
 	2, // [2:2] is the sub-list for extension type_name
 	2, // [2:2] is the sub-list for extension extendee
 	0, // [0:2] is the sub-list for field type_name
@@ -498,7 +606,7 @@ func file_proto_abuse_store_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_proto_abuse_store_proto_rawDesc), len(file_proto_abuse_store_proto_rawDesc)),
 			NumEnums:      2,
-			NumMessages:   4,
+			NumMessages:   6,
 			NumExtensions: 0,
 			NumServices:   1,
 		},

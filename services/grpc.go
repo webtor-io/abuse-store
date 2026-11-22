@@ -280,6 +280,31 @@ func (s *GRPC) Check(_ context.Context, in *pb.CheckRequest) (*pb.CheckReply, er
 	}
 }
 
+// Exempt lifts a ban still in its review window (Store.Exempt). The port has
+// no authentication, so it must never reach a ban that was not left open to
+// review: an immediate purge or a purge already due is FailedPrecondition. No
+// mail; the reason goes to the log.
+func (s *GRPC) Exempt(_ context.Context, in *pb.ExemptRequest) (*pb.ExemptReply, error) {
+	h := normalizeInfohash(in.GetInfohash())
+	if !infohashRe.MatchString(h) {
+		return nil, status.Error(codes.InvalidArgument, "wrong infohash")
+	}
+	l := log.WithField("infohash", h).WithField("reason", in.GetReason())
+	n, err := s.store.Exempt(h)
+	switch {
+	case errors.Is(err, ErrNotFound):
+		return nil, status.Errorf(codes.NotFound, "no abuse rows for infohash=%v", h)
+	case errors.Is(err, ErrPurgeDue):
+		l.Warn("exempt refused: not in the review window")
+		return nil, status.Errorf(codes.FailedPrecondition, "infohash=%v is not in its review window (immediate purge, row from before the delay, or purge due); exempt it in the database by hand", h)
+	case err != nil:
+		l.WithError(err).Error("failed to exempt")
+		return nil, status.Error(codes.Internal, err.Error())
+	}
+	l.WithField("rows", n).Info("infohash exempted")
+	return &pb.ExemptReply{Rows: int32(n)}, nil
+}
+
 // Close drains in-flight RPCs before returning.
 //
 // Closing only the listener — which is what this used to do — stops new
