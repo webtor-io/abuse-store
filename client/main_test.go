@@ -16,9 +16,15 @@ import (
 
 type recorder struct {
 	pb.UnimplementedAbuseStoreServer
-	got       *pb.PushRequest
-	gotExempt *pb.ExemptRequest
-	exemptErr error
+	got        *pb.PushRequest
+	gotExempt  *pb.ExemptRequest
+	exemptErr  error
+	gotConfirm *pb.ConfirmRequest
+}
+
+func (r *recorder) Confirm(_ context.Context, in *pb.ConfirmRequest) (*pb.ConfirmReply, error) {
+	r.gotConfirm = in
+	return &pb.ConfirmReply{Status: pb.ConfirmReply_CONFIRMED, Hashes: 2}, nil
 }
 
 func (r *recorder) Exempt(_ context.Context, in *pb.ExemptRequest) (*pb.ExemptReply, error) {
@@ -50,9 +56,11 @@ func TestPushFlagsReachTheRequest(t *testing.T) {
 
 	const a, b, c = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", "cccccccccccccccccccccccccccccccccccccccc"
 	got := run("--hash", a, "--extra-hash", b, "--extra-hash", c, "--purge-now", "--source", "mail",
-		"--subject", "s", "--started-at", "2026-11-21T10:00:00Z", "--notice-id", "n")
+		"--subject", "s", "--started-at", "2026-11-21T10:00:00Z", "--notice-id", "n",
+		"--reporter-name", "R", "--good-faith", "--authorized")
 	want := &pb.PushRequest{Infohash: a, ExtraInfohashes: []string{b, c}, PurgeNow: true, Source: pb.PushRequest_MAIL,
-		Subject: "s", StartedAt: 1795255200, NoticeId: "n", Cause: pb.PushRequest_ILLEGAL_CONTENT}
+		Subject: "s", StartedAt: 1795255200, NoticeId: "n", Cause: pb.PushRequest_ILLEGAL_CONTENT,
+		ReporterName: "R", GoodFaith: true, Authorized: true}
 	if !proto.Equal(got, want) {
 		t.Fatalf("got  %v\nwant %v", got, want)
 	}
@@ -62,7 +70,15 @@ func TestPushFlagsReachTheRequest(t *testing.T) {
 		t.Fatalf("defaults: %v", got)
 	}
 
-	for _, bad := range [][]string{{"--hash", a, "--source", "fax"}, {"--hash", a, "--started-at", "yesterday"}} {
+	for flag, want := range map[string]pb.PushRequest_Cause{"illegal": pb.PushRequest_ILLEGAL_CONTENT, "malware": pb.PushRequest_MALWARE,
+		"app_error": pb.PushRequest_APP_ERROR, "question": pb.PushRequest_QUESTION, "csam_report": pb.PushRequest_CSAM_REPORT,
+		"intimate_image": pb.PushRequest_INTIMATE_IMAGE} {
+		if got := run("--hash", a, "--cause", flag); got.Cause != want {
+			t.Errorf("--cause %s sent %v, want %v", flag, got.Cause, want)
+		}
+	}
+
+	for _, bad := range [][]string{{"--hash", a, "--source", "fax"}, {"--hash", a, "--started-at", "yesterday"}, {"--hash", a, "--cause", "spam"}} {
 		if err := newApp().Run(append([]string{"cli", "--host", "127.0.0.1", "--port", port, "push"}, bad...)); err == nil {
 			t.Errorf("%v accepted", bad)
 		}
@@ -102,5 +118,16 @@ func TestExemptFlagsAndErrors(t *testing.T) {
 		if err := run(); err == nil || !strings.Contains(err.Error(), "code = "+c.String()) {
 			t.Errorf("%v: got error %v", c, err)
 		}
+	}
+}
+
+// confirm sends --token.
+func TestConfirmSendsTheToken(t *testing.T) {
+	r, port := serveRecorder(t)
+	if err := newApp().Run([]string{"cli", "-H", "127.0.0.1", "-P", port, "confirm", "--token", "tok"}); err != nil {
+		t.Fatal(err)
+	}
+	if want := (&pb.ConfirmRequest{Token: "tok"}); !proto.Equal(r.gotConfirm, want) {
+		t.Fatalf("got  %v\nwant %v", r.gotConfirm, want)
 	}
 }

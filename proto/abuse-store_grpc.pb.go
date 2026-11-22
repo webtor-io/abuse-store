@@ -19,9 +19,10 @@ import (
 const _ = grpc.SupportPackageIsVersion9
 
 const (
-	AbuseStore_Push_FullMethodName   = "/AbuseStore/Push"
-	AbuseStore_Check_FullMethodName  = "/AbuseStore/Check"
-	AbuseStore_Exempt_FullMethodName = "/AbuseStore/Exempt"
+	AbuseStore_Push_FullMethodName    = "/AbuseStore/Push"
+	AbuseStore_Check_FullMethodName   = "/AbuseStore/Check"
+	AbuseStore_Exempt_FullMethodName  = "/AbuseStore/Exempt"
+	AbuseStore_Confirm_FullMethodName = "/AbuseStore/Confirm"
 )
 
 // AbuseStoreClient is the client API for AbuseStore service.
@@ -39,6 +40,11 @@ type AbuseStoreClient interface {
 	// admin port only (127.0.0.1, --admin-port); the public port answers
 	// UNIMPLEMENTED. Every exemption is mailed to support.
 	Exempt(ctx context.Context, in *ExemptRequest, opts ...grpc.CallOption) (*ExemptReply, error)
+	// Confirms a form notice held for email confirmation (server flag
+	// --form-confirm), with the token from the link mailed to the reporter.
+	// Once confirmed, the notice is stored and mailed like any other Push.
+	// Served on both ports: the token is the credential.
+	Confirm(ctx context.Context, in *ConfirmRequest, opts ...grpc.CallOption) (*ConfirmReply, error)
 }
 
 type abuseStoreClient struct {
@@ -79,6 +85,16 @@ func (c *abuseStoreClient) Exempt(ctx context.Context, in *ExemptRequest, opts .
 	return out, nil
 }
 
+func (c *abuseStoreClient) Confirm(ctx context.Context, in *ConfirmRequest, opts ...grpc.CallOption) (*ConfirmReply, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(ConfirmReply)
+	err := c.cc.Invoke(ctx, AbuseStore_Confirm_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 // AbuseStoreServer is the server API for AbuseStore service.
 // All implementations must embed UnimplementedAbuseStoreServer
 // for forward compatibility.
@@ -94,6 +110,11 @@ type AbuseStoreServer interface {
 	// admin port only (127.0.0.1, --admin-port); the public port answers
 	// UNIMPLEMENTED. Every exemption is mailed to support.
 	Exempt(context.Context, *ExemptRequest) (*ExemptReply, error)
+	// Confirms a form notice held for email confirmation (server flag
+	// --form-confirm), with the token from the link mailed to the reporter.
+	// Once confirmed, the notice is stored and mailed like any other Push.
+	// Served on both ports: the token is the credential.
+	Confirm(context.Context, *ConfirmRequest) (*ConfirmReply, error)
 	mustEmbedUnimplementedAbuseStoreServer()
 }
 
@@ -112,6 +133,9 @@ func (UnimplementedAbuseStoreServer) Check(context.Context, *CheckRequest) (*Che
 }
 func (UnimplementedAbuseStoreServer) Exempt(context.Context, *ExemptRequest) (*ExemptReply, error) {
 	return nil, status.Error(codes.Unimplemented, "method Exempt not implemented")
+}
+func (UnimplementedAbuseStoreServer) Confirm(context.Context, *ConfirmRequest) (*ConfirmReply, error) {
+	return nil, status.Error(codes.Unimplemented, "method Confirm not implemented")
 }
 func (UnimplementedAbuseStoreServer) mustEmbedUnimplementedAbuseStoreServer() {}
 func (UnimplementedAbuseStoreServer) testEmbeddedByValue()                    {}
@@ -188,6 +212,24 @@ func _AbuseStore_Exempt_Handler(srv interface{}, ctx context.Context, dec func(i
 	return interceptor(ctx, in, info, handler)
 }
 
+func _AbuseStore_Confirm_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(ConfirmRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(AbuseStoreServer).Confirm(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: AbuseStore_Confirm_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(AbuseStoreServer).Confirm(ctx, req.(*ConfirmRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 // AbuseStore_ServiceDesc is the grpc.ServiceDesc for AbuseStore service.
 // It's only intended for direct use with grpc.RegisterService,
 // and not to be introspected or modified (even as a copy)
@@ -206,6 +248,10 @@ var AbuseStore_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "Exempt",
 			Handler:    _AbuseStore_Exempt_Handler,
+		},
+		{
+			MethodName: "Confirm",
+			Handler:    _AbuseStore_Confirm_Handler,
 		},
 	},
 	Streams:  []grpc.StreamDesc{},

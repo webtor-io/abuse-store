@@ -27,6 +27,21 @@ var (
 	ErrNotFound = errors.New("store: abuse not found")
 	// ErrPurgeDue is Exempt refusing an infohash outside its review window.
 	ErrPurgeDue = errors.New("store: purge due, not in the review window")
+	// ErrTooManyNotices is AddUnconfirmed over one of its limits.
+	ErrTooManyNotices = errors.New("store: too many unconfirmed notices")
+	// ErrNoticeConfirmed and ErrNoticeExpired are Confirm on a token that
+	// already confirmed its notice, or that was not used in time.
+	ErrNoticeConfirmed = errors.New("store: notice already confirmed")
+	ErrNoticeExpired   = errors.New("store: notice expired")
+)
+
+// Unconfirmed form notices: how long a confirmation link lives, and how many
+// may be asked for in a day, per address and in all. They bound the mail the
+// public form can make this service send to a stranger's address.
+const (
+	confirmTTL        = 72 * time.Hour
+	confirmPerAddress = 3
+	confirmPerDay     = 200
 )
 
 // fingerprintSize is the length of a SHA-256 digest. Values of any other
@@ -85,6 +100,11 @@ func (s *Store) Sync() error {
 	pg := s.p.Get()
 	if pg == nil {
 		return errors.New("database not initialized")
+	}
+	// Notices past their expiry, confirmed or not. Housekeeping: a failure is
+	// logged and retried next sync.
+	if _, err := pg.Exec(`DELETE FROM unconfirmed_notice WHERE expires_at <= now()`); err != nil {
+		log.WithError(err).Error("failed to drop expired unconfirmed notices")
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -530,6 +550,106 @@ func (s *Store) Push(ctx context.Context, a *m.Abuse, override bool) (NoticeHash
 		}
 	}
 	return nh, nil
+}
+
+// AddUnconfirmed stores a form notice waiting for its reporter's
+// confirmation, under the sha256 of its token, and returns when it expires.
+// It blocks nothing: the row is not in abuse. More than confirmPerAddress
+// notices for email, or confirmPerDay in all, created in the last 24 hours is
+// ErrTooManyNotices. The table lock makes the count and the insert one step
+// across replicas, so concurrent pushes cannot all take the last slot.
+func (s *Store) AddUnconfirmed(ctx context.Context, tokenHash []byte, email string, notice []byte) (time.Time, error) {
+	db := s.p.Get()
+	if db == nil {
+		return time.Time{}, errors.New("database not initialized")
+	}
+	tx, err := db.BeginContext(ctx)
+	if err != nil {
+		return time.Time{}, err
+	}
+	defer func() { _ = tx.Close() }()
+	// Self-conflicting, and every other writer of the table waits on it too:
+	// Confirm's claim and release, DropUnconfirmed, Sync's DELETE. Fine only
+	// while this transaction is just the count and the insert; mail sent
+	// inside it would stall every Confirm on every replica.
+	if _, err := tx.Exec(`LOCK TABLE unconfirmed_notice IN SHARE ROW EXCLUSIVE MODE`); err != nil {
+		return time.Time{}, err
+	}
+	var c struct{ Address, Total int }
+	if _, err := tx.QueryOne(&c, `SELECT count(*) FILTER (WHERE lower(email) = lower(?)) AS address, count(*) AS total
+		FROM unconfirmed_notice WHERE created_at > now() - interval '24 hours'`, email); err != nil {
+		return time.Time{}, err
+	}
+	switch {
+	case c.Address >= confirmPerAddress:
+		return time.Time{}, errors.Wrapf(ErrTooManyNotices, "%d for this address in 24 hours", confirmPerAddress)
+	case c.Total >= confirmPerDay:
+		return time.Time{}, errors.Wrapf(ErrTooManyNotices, "%d in 24 hours", confirmPerDay)
+	}
+	var expires time.Time
+	if _, err := tx.QueryOne(pg.Scan(&expires), `INSERT INTO unconfirmed_notice (token_hash, email, notice, expires_at)
+		VALUES (?, ?, ?::jsonb, now() + ? * interval '1 second') RETURNING expires_at`,
+		tokenHash, email, string(notice), confirmTTL.Seconds()); err != nil {
+		return time.Time{}, err
+	}
+	return expires, tx.Commit()
+}
+
+// DropUnconfirmed deletes the notice stored under tokenHash: its confirmation
+// mail did not go out, and it must not hold one of the address's slots.
+func (s *Store) DropUnconfirmed(tokenHash []byte) error {
+	db := s.p.Get()
+	if db == nil {
+		return errors.New("database not initialized")
+	}
+	_, err := db.Exec(`DELETE FROM unconfirmed_notice WHERE token_hash = ?`, tokenHash)
+	return err
+}
+
+// Confirm claims the notice stored under tokenHash, marking it confirmed in
+// one statement, and runs apply on it: of Confirms racing on a token, one
+// claims it and the rest find it confirmed, so a notice is applied once.
+// apply failing releases the claim, for the reporter to try again. A token
+// never stored, or dropped by Sync after its expiry, is ErrNotFound.
+//
+// No transaction is held while apply runs: it needs connections of its own
+// (Push), and Confirms waiting on a held row would each hold one, emptying
+// the pool.
+//
+// ponytail: a release that fails leaves the notice confirmed but not applied
+// (logged); a claim column with a lease would let a retry take it over.
+func (s *Store) Confirm(ctx context.Context, tokenHash []byte, apply func(notice []byte) error) error {
+	db := s.p.Get()
+	if db == nil {
+		return errors.New("database not initialized")
+	}
+	var notice string
+	_, err := db.QueryOneContext(ctx, pg.Scan(&notice), `UPDATE unconfirmed_notice SET confirmed_at = now()
+		WHERE token_hash = ? AND confirmed_at IS NULL AND expires_at > now() RETURNING notice::text`, tokenHash)
+	if errors.Is(err, pg.ErrNoRows) {
+		var r struct{ Confirmed, Expired bool }
+		_, err = db.QueryOneContext(ctx, &r, `SELECT confirmed_at IS NOT NULL AS confirmed, expires_at <= now() AS expired
+			FROM unconfirmed_notice WHERE token_hash = ?`, tokenHash)
+		switch {
+		case errors.Is(err, pg.ErrNoRows):
+			return ErrNotFound
+		case err != nil:
+			return err
+		case r.Confirmed:
+			return ErrNoticeConfirmed
+		}
+		return ErrNoticeExpired
+	} else if err != nil {
+		return err
+	}
+	if err := apply([]byte(notice)); err != nil {
+		// Not ctx: a caller that gave up is the likely reason apply failed.
+		if _, rerr := db.Exec(`UPDATE unconfirmed_notice SET confirmed_at = NULL WHERE token_hash = ?`, tokenHash); rerr != nil {
+			log.WithError(rerr).Error("failed to release a notice whose confirmation failed: it reads as confirmed")
+		}
+		return err
+	}
+	return nil
 }
 
 // pushToCacheRaw writes an arbitrary cache entry. Split out of pushToCache so

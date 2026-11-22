@@ -36,5 +36,10 @@ type Abuse struct {
 	// PurgeAfter is when Sync may fan the ban out as resource.banned. Zero
 	// (NULL) means due: rows from before the column (migrations/6).
 	PurgeAfter time.Time `pg:"purge_after"`
-	CreatedAt  time.Time `pg:",default:now()"`
+	// The reporter's name and the two statements of a takedown notice, for
+	// audit (migrations/7). Empty and false on rows from before them.
+	ReporterName string    `pg:"reporter_name"`
+	GoodFaith    bool      `pg:"good_faith,use_zero"`
+	Authorized   bool      `pg:"authorized,use_zero"`
+	CreatedAt    time.Time `pg:",default:now()"`
 }

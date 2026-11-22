@@ -3,6 +3,7 @@ package services
 import (
 	"crypto/tls"
 	"fmt"
+	log "github.com/sirupsen/logrus"
 	"github.com/urfave/cli"
 	"mime"
 	"net/mail"
@@ -167,7 +168,14 @@ func (s *SMTP) Send(from string, to string, replyTo string, subj string, body st
 		return err
 	}
 
-	return c.Quit()
+	// The relay answered 250 to the data: the letter is accepted, whatever
+	// QUIT gets. Reporting it failed would have askConfirmation drop the
+	// notice and free its slot for a letter the reporter did receive.
+	if err := c.Quit(); err != nil {
+		log.WithError(err).Warn("smtp quit failed after the letter was accepted")
+		_ = c.Close()
+	}
+	return nil
 }
 
 func NewSMTP(c *cli.Context) *SMTP {

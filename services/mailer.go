@@ -9,6 +9,7 @@ import (
 	"slices"
 	"strings"
 	"text/template"
+	"time"
 
 	"github.com/urfave/cli"
 	m "github.com/webtor-io/abuse-store/models"
@@ -24,8 +25,9 @@ func emailQuote(in string) string {
 	return strings.Join(clines, "\n")
 }
 
+// isIllegal: the notice's cause bans, INTIMATE_IMAGE as ILLEGAL_CONTENT.
 func isIllegal(a *m.Abuse) bool {
-	return a.Cause == int(pb.PushRequest_ILLEGAL_CONTENT)
+	return bans(pb.PushRequest_Cause(a.Cause))
 }
 
 func causeName(c int) string {
@@ -85,6 +87,8 @@ type Notice struct {
 	// PurgeNow: the data purge went out with the notice. Otherwise it is
 	// scheduled for Abuse.PurgeAfter.
 	PurgeNow bool
+	// Confirmed: the reporter confirmed it through the link mailed to them.
+	Confirmed bool
 }
 
 type NoticeHash struct {
@@ -155,6 +159,25 @@ func (s *Mailer) SendUserEmail(n *Notice) error {
 	return nil
 }
 
+// SendConfirmEmail asks the reporter of a held form notice to confirm it.
+// Nothing the caller typed goes into it: the subject and body are fixed, and
+// carry only the notice id (a canonical uuid), the link, the validated
+// infohashes and the expiry. to is the syntax-checked address.
+func (s *Mailer) SendConfirmEmail(to, noticeID, link string, hashes []string, expires time.Time) error {
+	body := fmt.Sprintf("Hi!\n\n"+
+		"We received a report naming this address as the reporter's. Nothing has been done with it yet.\n\n"+
+		"If you sent it, confirm it within %d hours, by %s, here:\n\n%s\n\n"+
+		"It names %d torrent(s):\n%s\n"+
+		"If you did not send it, ignore this message: the report expires and nothing happens.\n\n"+
+		"This message was generated automatically.\n\nSincerely yours, Webtor Support Team.",
+		int(confirmTTL.Hours()), expires.UTC().Format("2006-01-02 15:04 UTC"), link, len(hashes), strings.Join(hashes, "\n")+"\n")
+	if err := s.smtp.Send(s.sender, to, "", "Confirm your report "+noticeID, body); err != nil {
+		return errors.Wrap(err, "failed to send confirmation request")
+	}
+	log.Infof("confirmation request sent to=%v", to)
+	return nil
+}
+
 // SendExemptEmail tells support that h was exempted through the admin port,
 // so every exemption set without a hand UPDATE leaves a letter.
 func (s *Mailer) SendExemptEmail(h, reason string, rows int) error {
@@ -178,6 +201,9 @@ func (s *Mailer) SendSupportEmail(n *Notice) error {
 	subject := fmt.Sprintf("[%s] %s", a.NoticeID, a.Subject)
 	if n.AnyExempt() {
 		subject = "[exempt] " + subject
+	}
+	if a.Cause == int(pb.PushRequest_CSAM_REPORT) {
+		subject = "[CSAM report] " + subject
 	}
 	err = s.smtp.Send(s.sender, s.support, a.Email, subject, body)
 

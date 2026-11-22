@@ -1,0 +1,4 @@
+DROP TABLE IF EXISTS unconfirmed_notice;
+ALTER TABLE abuse DROP COLUMN IF EXISTS reporter_name;
+ALTER TABLE abuse DROP COLUMN IF EXISTS good_faith;
+ALTER TABLE abuse DROP COLUMN IF EXISTS authorized;

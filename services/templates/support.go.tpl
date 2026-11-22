@@ -9,8 +9,11 @@ Notice ID: {{ .Abuse.NoticeID }}
 {{ end }}Filename:  {{ .Abuse.Filename }}
 Work:      {{ .Abuse.Work }}
 Cause:     {{ .Abuse.Cause | CauseName }}
-Email:     {{ .Abuse.Email }}
-{{ if IsIllegal .Abuse }}{{ if and .PurgeNow (not .AllExempt) }}
+Email:     {{ .Abuse.Email }}{{ if .Confirmed }} (confirmed: the reporter opened the link mailed to it){{ end }}
+{{ if or .Abuse.ReporterName .Abuse.GoodFaith .Abuse.Authorized }}Name:      {{ .Abuse.ReporterName }}
+Statement: {{ if .Abuse.GoodFaith }}yes{{ else }}NO{{ end }}, the use is not authorized by the owner, its agent or the law (good faith)
+Statement: {{ if .Abuse.Authorized }}yes{{ else }}NO{{ end }}, the reporter owns the work or is authorized to act for its owner
+{{ end }}{{ if IsIllegal .Abuse }}{{ if and .PurgeNow (not .AllExempt) }}
 Data purge: immediate, sent with this notice.
 {{ else if .Added }}
 Data purge: the automatic purge waits until {{ .Abuse.PurgeAfter.UTC.Format "2006-01-02 15:04 UTC" }}. The block is already in place.

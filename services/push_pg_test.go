@@ -12,6 +12,7 @@ import (
 	"slices"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -34,10 +35,11 @@ import (
 // The database is wiped before every test, so its name must end in _test.
 
 type pgEnv struct {
-	// g is the admin port, pub the public one.
-	g, pub *GRPC
-	s      *Store
-	sink   *mailSink
+	// g is the admin port, pub the public one, form the public one with
+	// --form-confirm.
+	g, pub, form *GRPC
+	s            *Store
+	sink         *mailSink
 	// banned drains what was published to resource.banned so far.
 	banned func() []string
 }
@@ -82,7 +84,7 @@ func newPGEnv(t *testing.T, purgeDelay string) *pgEnv {
 	if err := cs.NewPGMigration(pg).Run(); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := pg.Get().Exec(`TRUNCATE abuse, banned_published`); err != nil {
+	if _, err := pg.Get().Exec(`TRUNCATE abuse, banned_published, unconfirmed_notice`); err != nil {
 		t.Fatal(err)
 	}
 
@@ -110,6 +112,7 @@ func newPGEnv(t *testing.T, purgeDelay string) *pgEnv {
 	return &pgEnv{
 		g:    &GRPC{store: st, mailer: mr, admin: true},
 		pub:  &GRPC{store: st, mailer: mr},
+		form: &GRPC{store: st, mailer: mr, formConfirm: true, confirmURL: testConfirmURL},
 		s:    st,
 		sink: sink,
 		banned: func() []string {
@@ -408,6 +411,8 @@ func TestPGAlreadyExistsOnlyWhenAllExist(t *testing.T) {
 type mailSink struct {
 	mu   sync.Mutex
 	mail letters
+	// dropQuit hangs up on QUIT instead of answering 221.
+	dropQuit atomic.Bool
 }
 
 type letters []struct{ rcpt, body string }
@@ -491,6 +496,9 @@ func (k *mailSink) serve(c net.Conn) {
 			k.mu.Unlock()
 			_ = tp.PrintfLine("250 ok")
 		case cmd == "QUIT":
+			if k.dropQuit.Load() {
+				return
+			}
 			_ = tp.PrintfLine("221 bye")
 			return
 		default: // EHLO, MAIL FROM
@@ -522,3 +530,5 @@ func (k *mailSink) reset() {
 	k.mail = nil
 	k.mu.Unlock()
 }
+
+const testConfirmURL = "https://example.com/support/confirm"

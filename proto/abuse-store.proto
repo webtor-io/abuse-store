@@ -16,6 +16,32 @@ service AbuseStore {
   // admin port only (127.0.0.1, --admin-port); the public port answers
   // UNIMPLEMENTED. Every exemption is mailed to support.
   rpc Exempt (ExemptRequest) returns (ExemptReply) {}
+
+  // Confirms a form notice held for email confirmation (server flag
+  // --form-confirm), with the token from the link mailed to the reporter.
+  // Once confirmed, the notice is stored and mailed like any other Push.
+  // Served on both ports: the token is the credential.
+  rpc Confirm (ConfirmRequest) returns (ConfirmReply) {}
+}
+
+message ConfirmRequest {
+  // The t parameter of the confirmation link, as mailed.
+  string token = 1;
+}
+
+message ConfirmReply {
+  enum Status {
+    // No such token (also: dropped after its expiry by the next sync).
+    UNKNOWN           = 0;
+    CONFIRMED         = 1;
+    // This token already confirmed its notice; nothing was done again.
+    ALREADY_CONFIRMED = 2;
+    // The notice was not confirmed in time; nothing was stored.
+    EXPIRED           = 3;
+  }
+  Status status = 1;
+  // How many infohashes the confirmed notice named (CONFIRMED only).
+  int32 hashes = 2;
 }
 
 message ExemptRequest {
@@ -31,6 +57,9 @@ message ExemptReply {
 
 // The push response message containing
 message PushReply {
+  // The notice is held until the reporter confirms it through the link just
+  // mailed to them (--form-confirm); nothing is blocked yet.
+  bool confirmation_sent = 1;
 }
 
 // The push request message
@@ -48,6 +77,11 @@ message PushRequest {
     MALWARE         = 1;
     APP_ERROR       = 2;
     QUESTION        = 3;
+    // Mailed to support only, prefixed [CSAM report]: never stored, never
+    // banned, no letter to the reporter, whatever the port or source.
+    CSAM_REPORT     = 4;
+    // Banned like ILLEGAL_CONTENT.
+    INTIMATE_IMAGE  = 5;
   }
   Cause cause        = 9;
   enum Source {
@@ -70,6 +104,14 @@ message PushRequest {
   // infohash, gets its own row under the same notice_id, and the notice is
   // mailed once listing all of them. The fingerprint applies to infohash only.
   repeated string extra_infohashes = 13;
+  // The reporter's name and their two statements of a takedown notice: the
+  // use is not authorized (good faith), and they are the owner or authorized
+  // to act for them. Stored on the rows for audit and shown to support. With
+  // --form-confirm, an ILLEGAL_CONTENT notice from the form on the public
+  // port needs all three and email (INTIMATE_IMAGE needs email only).
+  string reporter_name = 14;
+  bool   good_faith    = 15;
+  bool   authorized    = 16;
 }
 
 // The check request message containing the infoHash and, optionally, the
