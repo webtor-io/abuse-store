@@ -2,6 +2,7 @@ package services
 
 import (
 	"bytes"
+	"context"
 	"encoding/hex"
 	"encoding/json"
 	"strings"
@@ -314,18 +315,20 @@ func (s *Store) IsExempt(h string) (bool, error) {
 // bans), a row from before the delay (NULL) or a purge already due is
 // ErrPurgeDue; no rows is ErrNotFound. The caller is unauthenticated, so
 // these bans are left to a hand UPDATE in Postgres. Returns the rows changed,
-// 0 when h was already exempt.
+// 0 when h was already exempt. ctx bounds the transaction, so a caller that
+// gave up is not exempted later, when a row lock it waited on is released.
 //
-// It holds mu like Push and Sync: a Sync that read the table before the
-// UPDATE would otherwise put h back in the cache for a whole interval.
-func (s *Store) Exempt(h string) (int, error) {
+// It takes mu like Push and Sync, but only after the commit, for the cache
+// reload: a Sync that read the table before the commit holds mu until its
+// prune is done, so the reload runs after it on a fresh read and the stale
+// rows cannot put h back. Waiting on a row lock while holding mu would stall
+// every Push and Sync on the replica until that lock is released.
+func (s *Store) Exempt(ctx context.Context, h string) (int, error) {
 	db := s.p.Get()
 	if db == nil {
 		return 0, errors.New("database not initialized")
 	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	tx, err := db.Begin()
+	tx, err := db.BeginContext(ctx)
 	if err != nil {
 		return 0, err
 	}
@@ -355,6 +358,8 @@ func (s *Store) Exempt(h string) (int, error) {
 	if err := tx.Commit(); err != nil {
 		return 0, err
 	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	// The cache half of Sync on a fresh read, also when nothing changed, so a
 	// retry repairs a failed one. Deleting only h's key would leave the
 	// fingerprint of its row blocking the payload until the next sync.

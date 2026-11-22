@@ -284,13 +284,13 @@ func (s *GRPC) Check(_ context.Context, in *pb.CheckRequest) (*pb.CheckReply, er
 // no authentication, so it must never reach a ban that was not left open to
 // review: an immediate purge or a purge already due is FailedPrecondition. No
 // mail; the reason goes to the log.
-func (s *GRPC) Exempt(_ context.Context, in *pb.ExemptRequest) (*pb.ExemptReply, error) {
+func (s *GRPC) Exempt(ctx context.Context, in *pb.ExemptRequest) (*pb.ExemptReply, error) {
 	h := normalizeInfohash(in.GetInfohash())
 	if !infohashRe.MatchString(h) {
 		return nil, status.Error(codes.InvalidArgument, "wrong infohash")
 	}
 	l := log.WithField("infohash", h).WithField("reason", in.GetReason())
-	n, err := s.store.Exempt(h)
+	n, err := s.store.Exempt(ctx, h)
 	switch {
 	case errors.Is(err, ErrNotFound):
 		return nil, status.Errorf(codes.NotFound, "no abuse rows for infohash=%v", h)

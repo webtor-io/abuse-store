@@ -180,3 +180,92 @@ func TestPGExemptTakesTheStoreLock(t *testing.T) {
 		t.Fatal("Exempt did not return after the lock was released")
 	}
 }
+
+// holdRowLock opens a transaction holding a row lock on h's rows, as a hand
+// UPDATE left open in psql does, and returns its commit.
+func (e *pgEnv) holdRowLock(t *testing.T, h string) (commit func()) {
+	t.Helper()
+	tx, err := e.s.p.Get().Begin()
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = tx.Close() })
+	if _, err := tx.Exec(`UPDATE abuse SET description = 'held' WHERE infohash = ?`, h); err != nil {
+		t.Fatal(err)
+	}
+	return func() {
+		if err := tx.Commit(); err != nil {
+			t.Fatal(err)
+		}
+	}
+}
+
+// Exempt waiting on a row lock does not hold up Push or Sync on the replica,
+// a purge_now ban of another hash included; once the lock goes, it exempts.
+func TestPGExemptWaitingOnARowLockStallsNothingElse(t *testing.T) {
+	e := newPGEnv(t, "72h")
+	e.push(t, &pb.PushRequest{Infohash: hashA})
+	commit := e.holdRowLock(t, hashA)
+	exempted := make(chan codes.Code, 1)
+	go func() {
+		_, err := e.g.Exempt(context.Background(), &pb.ExemptRequest{Infohash: hashA})
+		exempted <- status.Code(err)
+	}()
+	time.Sleep(200 * time.Millisecond)
+	done := make(chan error, 1)
+	go func() {
+		_, err := e.g.Push(context.Background(), &pb.PushRequest{Infohash: hashB, PurgeNow: true})
+		if err == nil {
+			err = e.s.Sync()
+		}
+		done <- err
+	}()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(3 * time.Second):
+		commit()
+		t.Fatal("Push and Sync stalled behind Exempt waiting on a row lock")
+	}
+	if !blocked(t, e.s, hashB, nil) {
+		t.Fatal("purge_now ban of another hash does not block")
+	}
+	commit()
+	if c := <-exempted; c != codes.OK {
+		t.Fatalf("exempt after the lock went: %v", c)
+	}
+}
+
+// The caller's deadline ends Exempt's wait on a row lock, and the hash stays
+// banned: it is not exempted later, when the lock goes.
+func TestPGExemptGivesUpAtTheDeadline(t *testing.T) {
+	e := newPGEnv(t, "72h")
+	e.push(t, &pb.PushRequest{Infohash: hashA})
+	commit := e.holdRowLock(t, hashA)
+	ctx, cancel := context.WithTimeout(context.Background(), 300*time.Millisecond)
+	defer cancel()
+	exempted := make(chan codes.Code, 1)
+	go func() {
+		_, err := e.g.Exempt(ctx, &pb.ExemptRequest{Infohash: hashA})
+		exempted <- status.Code(err)
+	}()
+	select {
+	case c := <-exempted:
+		if c == codes.OK {
+			t.Fatal("exempt past its deadline: OK")
+		}
+	case <-time.After(3 * time.Second):
+		commit()
+		<-exempted
+		t.Fatal("Exempt still waiting on the row lock 3s after a 300ms deadline")
+	}
+	commit()
+	if n := e.count(t, `SELECT count(*) FROM abuse WHERE exempt`); n != 0 {
+		t.Fatalf("%d rows exempt after the caller gave up", n)
+	}
+	if !blocked(t, e.s, hashA, nil) {
+		t.Fatal("unblocked by an Exempt that gave up")
+	}
+}
