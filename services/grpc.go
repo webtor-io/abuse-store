@@ -36,9 +36,16 @@ func normalizeInfohash(h string) string {
 }
 
 const (
-	grpcHostFlag = "grpc-host"
-	grpcPortFlag = "grpc-port"
+	grpcHostFlag  = "grpc-host"
+	grpcPortFlag  = "grpc-port"
+	adminPortFlag = "admin-port"
 )
+
+// adminHost is where the admin listener binds, and the whole of its access
+// control: only something inside the pod's network namespace reaches it,
+// which from outside means kubectl port-forward to the pod. It has no
+// Service port and needs no containerPort.
+const adminHost = "127.0.0.1"
 
 func RegisterGRPCFlags(f []cli.Flag) []cli.Flag {
 	return append(f,
@@ -54,6 +61,12 @@ func RegisterGRPCFlags(f []cli.Flag) []cli.Flag {
 			Value:  50051,
 			EnvVar: "GRPC_PORT",
 		},
+		cli.IntFlag{
+			Name:   adminPortFlag,
+			Usage:  "admin grpc port on " + adminHost + " (Push with purge_now honoured, Check, Exempt); 0 disables it",
+			Value:  50052,
+			EnvVar: "ADMIN_GRPC_PORT",
+		},
 	)
 }
 
@@ -63,10 +76,15 @@ func RegisterGRPCFlags(f []cli.Flag) []cli.Flag {
 // leaving room for Badger to close afterwards.
 const gracefulStopTimeout = 15 * time.Second
 
+// GRPC serves one listener. The public one (the Service, no authentication)
+// serves Push and Check and ignores purge_now; the admin one also honours
+// purge_now and serves Exempt, the two calls that override a decision: an
+// immediate ban beats an exemption, an exemption lifts a ban.
 type GRPC struct {
 	pb.UnimplementedAbuseStoreServer
 	host   string
 	port   int
+	admin  bool
 	ln     net.Listener
 	store  *Store
 	mailer *Mailer
@@ -78,6 +96,20 @@ func NewGRPC(c *cli.Context, s *Store, mr *Mailer) *GRPC {
 	return &GRPC{
 		host:   c.String(grpcHostFlag),
 		port:   c.Int(grpcPortFlag),
+		store:  s,
+		mailer: mr,
+	}
+}
+
+// NewAdminGRPC is the admin listener on adminHost, or nil with --admin-port 0.
+func NewAdminGRPC(c *cli.Context, s *Store, mr *Mailer) *GRPC {
+	if c.Int(adminPortFlag) == 0 {
+		return nil
+	}
+	return &GRPC{
+		host:   adminHost,
+		port:   c.Int(adminPortFlag),
+		admin:  true,
 		store:  s,
 		mailer: mr,
 	}
@@ -98,7 +130,7 @@ func (s *GRPC) Serve() error {
 	s.gs = gs
 	s.mu.Unlock()
 
-	log.Infof("serving GRPC at %v", addr)
+	log.WithField("admin", s.admin).Infof("serving GRPC at %v", addr)
 	return gs.Serve(ln)
 }
 func (s *GRPC) Push(ctx context.Context, in *pb.PushRequest) (*pb.PushReply, error) {
@@ -106,7 +138,8 @@ func (s *GRPC) Push(ctx context.Context, in *pb.PushRequest) (*pb.PushReply, err
 	if in.GetStartedAt() != 0 {
 		startedAt = time.Unix(in.GetStartedAt(), 0)
 	}
-	noticeID := in.GetNoticeId()
+	// Both end up in a mail header (the subject); smtp.go encodes it as well.
+	noticeID := oneLine(in.GetNoticeId())
 	if noticeID == "" {
 		noticeID = fmt.Sprintf("%s", uuid.NewV4())
 	}
@@ -133,7 +166,7 @@ func (s *GRPC) Push(ctx context.Context, in *pb.PushRequest) (*pb.PushReply, err
 		}
 	}
 
-	subject := in.GetSubject()
+	subject := oneLine(in.GetSubject())
 	if subject == "" {
 		subject = fmt.Sprintf("Abuse notice %v", noticeID)
 	}
@@ -159,73 +192,43 @@ func (s *GRPC) Push(ctx context.Context, in *pb.PushRequest) (*pb.PushReply, err
 		return &pb.PushReply{}, nil
 	}
 	// The block is immediate; the purge waits out the delay unless the caller
-	// or the server (delay 0) says otherwise. Sync publishes once it is due.
-	n.PurgeNow = in.GetPurgeNow() || s.store.pd <= 0
+	// on the admin port or the server (delay 0) says otherwise. Sync publishes
+	// once it is due.
+	override := in.GetPurgeNow() && s.admin
+	if in.GetPurgeNow() && !s.admin {
+		log.WithField("notice_id", noticeID).WithField("infohash", strings.Join(hashes, ",")).
+			Warn("purge_now ignored on the public port")
+	}
+	n.PurgeNow = override || s.store.pd <= 0
 	a.PurgeAfter = time.Now()
 	if !n.PurgeNow {
 		a.PurgeAfter = a.PurgeAfter.Add(s.store.pd)
 	}
-	existed := 0
 	for i, h := range hashes {
-		nh := NoticeHash{Infohash: h}
-		// A reviewed, exempt infohash is not banned again: no row, no
-		// resource.banned purge. To the reporter it looks like any accepted
-		// report ("under moderation" in the letter); support gets the letter
-		// marked exempt, so every repeat request is seen. An immediate ban
-		// overrides an exemption set through the Exempt RPC (IsExempt).
-		nh.Exempt, err = s.store.IsExempt(h, n.PurgeNow)
-		if err != nil {
-			return nil, errors.Wrap(err, "failed to check exemption")
+		row := *a
+		row.Infohash = h
+		if i > 0 {
+			// The fingerprint is the primary torrent's payload, not the
+			// extras'.
+			row.Fingerprint = nil
 		}
-		if nh.Exempt {
-			log.WithField("infohash", h).Info("report for exempt infohash not added to stoplist")
-			n.Hashes = append(n.Hashes, nh)
-			continue
-		}
-		// Deduplicate on the REPORT, not on the payload: the fingerprints are
-		// deliberately not passed here. A newly reported infohash whose payload
-		// is already blocked still deserves its own abuse row, otherwise the
-		// audit trail loses the fact that it was reported at all.
-		r, err := s.Check(ctx, &pb.CheckRequest{Infohash: h})
+		nh, err := s.store.Push(ctx, &row, override)
 		if err != nil {
 			return nil, err
 		}
-		nh.Existed = r.Exists
-		if nh.Existed {
-			existed++
-		} else {
-			row := *a
-			row.Infohash = h
-			if i > 0 {
-				// The fingerprint is the primary torrent's payload, not the
-				// extras'.
-				row.Fingerprint = nil
-			}
-			if err := s.store.Push(&row); errors.Is(err, ErrExempt) {
-				// Exempted since the check above.
-				log.WithField("infohash", h).Info("report for exempt infohash not added to stoplist")
-				nh.Exempt = true
-			} else if err != nil {
-				return nil, err
-			}
+		if nh.Exempt {
+			log.WithField("infohash", h).Info("report for exempt infohash not added to stoplist")
+		} else if n.PurgeNow {
+			// Duplicates included: a dropped publish is retried by Sync, and
+			// consumers must be idempotent. A delayed ban publishes nothing
+			// here, so a repeat report cannot purge it early.
+			s.store.PublishBanned(h)
 		}
 		n.Hashes = append(n.Hashes, nh)
 	}
-	// A duplicate does not re-publish on its own: a delayed row must not be
-	// purged early by a repeat report, and a dropped publish is retried by
-	// Sync. Only an immediate purge publishes here, duplicates included, and
-	// it brings their pending purge forward. Consumers must be idempotent.
-	advanced := 0
-	if n.PurgeNow {
-		for i := range n.Hashes {
-			if !n.Hashes[i].Exempt && s.store.PurgeNow(n.Hashes[i].Infohash) {
-				n.Hashes[i].Advanced = true
-				advanced++
-			}
-		}
-	}
-	// A purge brought forward is news to support, even with no new row.
-	if existed == len(hashes) && advanced == 0 {
+	// Silent only when nothing changed: every hash already blocked (an exempt
+	// or overridden one was not) and no purge brought forward.
+	if !slices.ContainsFunc(n.Hashes, func(h NoticeHash) bool { return !h.Existed || h.Advanced }) {
 		return nil, status.Errorf(codes.AlreadyExists, "abuse notice with infoHash=%v already exists", strings.Join(hashes, ","))
 	}
 	s.notify(n)
@@ -251,6 +254,12 @@ func noticeInfohashes(primary string, extras []string) ([]string, error) {
 		}
 	}
 	return hashes, nil
+}
+
+// oneLine drops CR and LF, so a value that ends up in a mail header cannot
+// start a header of its own.
+func oneLine(v string) string {
+	return strings.NewReplacer("\r", "", "\n", "").Replace(v)
 }
 
 // notify mails the reporter (when they left an address) and support, once
@@ -285,11 +294,14 @@ func (s *GRPC) Check(_ context.Context, in *pb.CheckRequest) (*pb.CheckReply, er
 	}
 }
 
-// Exempt lifts a ban still in its review window (Store.Exempt). The port has
-// no authentication, so it must never reach a ban that was not left open to
-// review: an immediate purge or a purge already due is FailedPrecondition. No
-// mail; the reason goes to the log.
+// Exempt lifts a ban still in its review window (Store.Exempt), on the admin
+// port only: the public one answers Unimplemented. An immediate purge or a
+// purge already due is FailedPrecondition, and is exempted by hand. Every
+// exemption is mailed to support with its reason.
 func (s *GRPC) Exempt(ctx context.Context, in *pb.ExemptRequest) (*pb.ExemptReply, error) {
+	if !s.admin {
+		return s.UnimplementedAbuseStoreServer.Exempt(ctx, in)
+	}
 	h := normalizeInfohash(in.GetInfohash())
 	if !infohashRe.MatchString(h) {
 		return nil, status.Error(codes.InvalidArgument, "wrong infohash")
@@ -307,6 +319,13 @@ func (s *GRPC) Exempt(ctx context.Context, in *pb.ExemptRequest) (*pb.ExemptRepl
 		return nil, status.Error(codes.Internal, err.Error())
 	}
 	l.WithField("rows", n).Info("infohash exempted")
+	if n > 0 {
+		go func() {
+			if err := s.mailer.SendExemptEmail(h, oneLine(in.GetReason()), n); err != nil {
+				log.WithError(err).Error("failed to send exempt email")
+			}
+		}()
+	}
 	return &pb.ExemptReply{Rows: int32(n)}, nil
 }
 

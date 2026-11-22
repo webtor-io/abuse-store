@@ -122,7 +122,7 @@ func (PushRequest_Source) EnumDescriptor() ([]byte, []int) {
 type ExemptRequest struct {
 	state    protoimpl.MessageState `protogen:"open.v1"`
 	Infohash string                 `protobuf:"bytes,1,opt,name=infohash,proto3" json:"infohash,omitempty"`
-	// Why, for the server log.
+	// Why, for the server log and the letter to support.
 	Reason        string `protobuf:"bytes,2,opt,name=reason,proto3" json:"reason,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
@@ -274,8 +274,9 @@ type PushRequest struct {
 	Fingerprint []byte `protobuf:"bytes,11,opt,name=fingerprint,proto3" json:"fingerprint,omitempty"`
 	// Purge the data at once instead of after the server's --purge-delay: for
 	// bans that must not wait for review (the CSAM ban script). On a hash that
-	// is already blocked it brings a pending purge forward. The block itself is
-	// immediate either way.
+	// is already blocked it brings a pending purge forward, and it overrides
+	// any exemption of the hash. The block itself is immediate either way.
+	// Honoured on the admin port only; the public port ignores it.
 	PurgeNow bool `protobuf:"varint,12,opt,name=purge_now,json=purgeNow,proto3" json:"purge_now,omitempty"`
 	// More infohashes named by the same notice. Each is validated like
 	// infohash, gets its own row under the same notice_id, and the notice is

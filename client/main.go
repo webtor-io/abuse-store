@@ -93,7 +93,7 @@ func newApp() *cli.App {
 				},
 				cli.BoolFlag{
 					Name:  "purge-now",
-					Usage: "Purge the data at once instead of after the server's purge delay",
+					Usage: "Purge the data at once instead of after the server's purge delay, overriding any exemption; honoured on the admin port only (-P 50052 through a port-forward to the pod)",
 				},
 				cli.StringFlag{
 					Name:  "source",
@@ -207,7 +207,7 @@ func newApp() *cli.App {
 		},
 		{
 			Name:  "exempt",
-			Usage: "exempts an infohash whose ban is still in its review window; prints the rows changed",
+			Usage: "exempts an infohash whose ban is still in its review window; prints the rows changed. Admin port only (-P 50052 through a port-forward to the pod)",
 			Flags: []cli.Flag{
 				cli.StringFlag{
 					Name:  "infohash, hash, ha",
@@ -215,7 +215,7 @@ func newApp() *cli.App {
 				},
 				cli.StringFlag{
 					Name:  "reason",
-					Usage: "why, for the server log",
+					Usage: "why, for the server log and the letter to support",
 				},
 			},
 			Action: func(c *cli.Context) error {

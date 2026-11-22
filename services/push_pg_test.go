@@ -3,7 +3,9 @@ package services
 import (
 	"context"
 	"encoding/json"
+	"mime"
 	"net"
+	"net/mail"
 	"net/textproto"
 	"net/url"
 	"os"
@@ -32,9 +34,10 @@ import (
 // The database is wiped before every test, so its name must end in _test.
 
 type pgEnv struct {
-	g    *GRPC
-	s    *Store
-	sink *mailSink
+	// g is the admin port, pub the public one.
+	g, pub *GRPC
+	s      *Store
+	sink   *mailSink
 	// banned drains what was published to resource.banned so far.
 	banned func() []string
 }
@@ -103,8 +106,10 @@ func newPGEnv(t *testing.T, purgeDelay string) *pgEnv {
 	}
 	st := NewStore(c, b, pg, n)
 	smtp, sink := newMailSink(t)
+	mr := &Mailer{sender: "noreply@example.com", support: "support@example.com", smtp: smtp}
 	return &pgEnv{
-		g:    &GRPC{store: st, mailer: &Mailer{sender: "noreply@example.com", support: "support@example.com", smtp: smtp}},
+		g:    &GRPC{store: st, mailer: mr, admin: true},
+		pub:  &GRPC{store: st, mailer: mr},
 		s:    st,
 		sink: sink,
 		banned: func() []string {
@@ -288,23 +293,52 @@ func TestPGDuplicatePush(t *testing.T) {
 	}
 }
 
-// An exempt hash in a purge_now notice is not purged, whether purge_now or a
-// server with no delay makes it immediate.
-func TestPGPurgeNowSkipsExempt(t *testing.T) {
-	for _, tc := range []struct {
-		name, delay string
-		purgeNow    bool
-	}{{"purge_now", "72h", true}, {"delay 0", "0", false}} {
-		t.Run(tc.name, func(t *testing.T) {
-			e := newPGEnv(t, tc.delay)
-			e.exec(t, `INSERT INTO abuse (infohash, exempt) VALUES (?, true)`, hashC)
-			if c := e.push(t, &pb.PushRequest{Infohash: hashA, ExtraInfohashes: []string{hashC}, PurgeNow: tc.purgeNow}); c != codes.OK {
-				t.Fatalf("push: %v", c)
-			}
-			if got := e.banned(); !slices.Equal(got, []string{hashA}) {
-				t.Fatalf("published %v, want only [%s]", got, hashA)
-			}
-		})
+// A server with no delay purges every report at once, but only an immediate
+// ban on the admin port overrides an exemption: an exempt hash in an ordinary
+// notice is neither stored nor purged, whichever port it came in on.
+func TestPGDelayZeroSkipsExempt(t *testing.T) {
+	e := newPGEnv(t, "0")
+	e.exec(t, `INSERT INTO abuse (infohash, exempt) VALUES (?, true)`, hashC)
+	for _, g := range []*GRPC{e.pub, e.g} {
+		if _, err := g.Push(context.Background(), &pb.PushRequest{Infohash: hashA, ExtraInfohashes: []string{hashC}}); err != nil && status.Code(err) != codes.AlreadyExists {
+			t.Fatalf("push: %v", err)
+		}
+		if got := e.banned(); !slices.Equal(got, []string{hashA}) {
+			t.Fatalf("published %v, want only [%s]", got, hashA)
+		}
+	}
+	if n := e.count(t, `SELECT count(*) FROM abuse WHERE infohash = ?`, hashC); n != 1 {
+		t.Fatalf("%d rows for the exempt hash, want its exempt one only", n)
+	}
+}
+
+// purge_now on the public port is ignored: the ban blocks and waits out the
+// delay like any report, and a repeat brings no pending purge forward.
+func TestPGPublicPortIgnoresPurgeNow(t *testing.T) {
+	e := newPGEnv(t, "72h")
+	if _, err := e.pub.Push(context.Background(), &pb.PushRequest{Infohash: hashA, PurgeNow: true}); err != nil {
+		t.Fatal(err)
+	}
+	if !blocked(t, e.s, hashA, nil) {
+		t.Fatal("does not block")
+	}
+	if got := e.banned(); len(got) != 0 {
+		t.Fatalf("published at Push: %v", got)
+	}
+	if n := e.count(t, `SELECT count(*) FROM abuse WHERE purge_after > now() + interval '71 hours'`); n != 1 {
+		t.Fatalf("%d rows waiting out the delay, want 1", n)
+	}
+	if l := e.sink.waitFor(t, 1).to("support@example.com"); !strings.Contains(l, "waits until") {
+		t.Fatalf("support letter: %s", l)
+	}
+	if _, err := e.pub.Push(context.Background(), &pb.PushRequest{Infohash: hashA, PurgeNow: true}); status.Code(err) != codes.AlreadyExists {
+		t.Fatalf("repeat: %v, want AlreadyExists", err)
+	}
+	if got := e.banned(); len(got) != 0 {
+		t.Fatalf("repeat published %v", got)
+	}
+	if n := e.count(t, `SELECT count(*) FROM abuse WHERE purge_after > now()`); n != 1 {
+		t.Fatal("repeat brought the purge forward")
 	}
 }
 
@@ -385,6 +419,30 @@ func (l letters) to(rcpt string) string {
 		}
 	}
 	return ""
+}
+
+// subject is the decoded Subject of the letter to rcpt.
+func (l letters) subject(t *testing.T, rcpt string) string {
+	t.Helper()
+	return parseLetter(t, l.to(rcpt)).subject
+}
+
+type letter struct {
+	header  mail.Header
+	subject string
+}
+
+func parseLetter(t *testing.T, raw string) letter {
+	t.Helper()
+	msg, err := mail.ReadMessage(strings.NewReader(raw))
+	if err != nil {
+		t.Fatalf("unparsable letter %q: %v", raw, err)
+	}
+	subj, err := new(mime.WordDecoder).DecodeHeader(msg.Header.Get("Subject"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return letter{header: msg.Header, subject: subj}
 }
 
 func newMailSink(t *testing.T) (*SMTP, *mailSink) {

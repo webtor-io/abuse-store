@@ -28,14 +28,11 @@ type Abuse struct {
 	// when the report is not about one (DMCA notices, questions) or predates
 	// the column.
 	Fingerprint []byte `pg:"fingerprint"`
-	// Exempt marks a reviewed infohash that must never block: the row and
+	// Exempt marks a reviewed infohash that must not block: the row and
 	// every other row for the same infohash stay out of the stoplist, and a
 	// repeat report is mailed but not stored (migrations/4_abuse_exempt).
+	// An immediate ban on the admin port (purge_now) clears it.
 	Exempt bool `pg:"exempt,use_zero"`
-	// ExemptByRPC marks an exemption set through the Exempt RPC. An immediate
-	// (purge_now) ban clears it instead of being absorbed by it; one set by
-	// hand holds against every report (migrations/7).
-	ExemptByRPC bool `pg:"exempt_by_rpc,use_zero"`
 	// PurgeAfter is when Sync may fan the ban out as resource.banned. Zero
 	// (NULL) means due: rows from before the column (migrations/6).
 	PurgeAfter time.Time `pg:"purge_after"`

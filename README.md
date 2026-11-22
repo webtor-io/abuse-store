@@ -23,11 +23,25 @@ gRPC client ──► Push / Check  ─┬─► PostgreSQL  (source of truth, p
 
 ## gRPC API
 
-Defined in [`proto/abuse-store.proto`](proto/abuse-store.proto):
+Defined in [`proto/abuse-store.proto`](proto/abuse-store.proto), served on two listeners:
 
-- `Push(PushRequest) → PushReply` — submit an abuse notice naming `infohash` and, optionally, more `extra_infohashes`. Each hash must be a full 40-character hex infohash (case and surrounding whitespace are normalized), repeats are dropped, `email` is validated; `notice_id` and `started_at` default to a fresh UUID and the current time. Only `ILLEGAL_CONTENT` causes a database write: one row per hash not yet blocked, under the same `notice_id`, purged after `--purge-delay` — or at once with `purge_now = true`, which also brings forward a pending purge of an already-blocked hash. A notice whose every hash is already blocked, and that brought no pending purge forward, is rejected with `ALREADY_EXISTS` and mailed to no one; a repeat report without `purge_now` publishes nothing. A hash marked `exempt` in the table is mailed as usual (the reporter is told it is under moderation, support sees it marked `[exempt]`) but is neither stored nor fanned out, except that an immediate ban (`purge_now`, or `--purge-delay 0`) overrides an exemption set through `Exempt`: it is stored and purged, and the exemption is cleared. One set by hand absorbs every report. One letter goes to support and at most one to the reporter per notice, listing every hash.
+| Listener | Bind | Serves | Who uses it |
+|---|---|---|---|
+| public, `--grpc-port` (50051) | `--grpc-host`; the Kubernetes Service | `Push` (`purge_now` ignored), `Check`; `Exempt` is `UNIMPLEMENTED` | web-ui (DMCA form, `Check` on playback), torrent-http-proxy (`Check`), the automated intake of forwarded abuse reports |
+| admin, `--admin-port` (50052; 0 disables it) | `127.0.0.1` inside the pod only | `Push` with `purge_now` honoured, `Check`, `Exempt` | the CSAM ban script of the platform's monitoring agent, and owner decisions |
+
+The admin port has no Service port and no `containerPort`. It is reached with `kubectl port-forward deploy/abuse-store <local>:50052`, so its access control is Kubernetes RBAC (`pods/portforward` or `exec` in the namespace). It carries the two calls that override an earlier decision: an immediate ban beats an exemption, and an exemption lifts a ban.
+
+- `Push(PushRequest) → PushReply` — submit an abuse notice naming `infohash` and, optionally, more `extra_infohashes`. Each hash must be a full 40-character hex infohash (case and surrounding whitespace are normalized), repeats are dropped, `email` is validated, CR and LF are dropped from `subject` and `notice_id`; `notice_id` and `started_at` default to a fresh UUID and the current time. Only `ILLEGAL_CONTENT` causes a database write: one row per hash not yet blocked, under the same `notice_id`, purged after `--purge-delay`. On the admin port, `purge_now = true` purges at once and brings forward a pending purge of an already-blocked hash; the public port ignores it (the delay applies, and the server logs a warning). A notice whose every hash is already blocked, and that brought no pending purge forward, is rejected with `ALREADY_EXISTS` and mailed to no one; a repeat report without an immediate purge publishes nothing. A hash marked `exempt` in the table absorbs ordinary reports: they are mailed as usual (the reporter is told it is under moderation, support sees it marked `[exempt]`) but neither stored nor fanned out. **`purge_now` on the admin port beats any exemption**, set by hand or with `Exempt`: in one transaction it clears the exemption, brings every pending purge of the hash forward and stores its row, then publishes, and support is told "an exemption was overridden by an immediate ban". A server with `--purge-delay 0` purges every report at once but does not override exemptions. One letter goes to support and at most one to the reporter per notice, listing every hash.
 - `Check(CheckRequest) → CheckReply` — returns `exists = true` if the infohash is in the stoplist (Badger lookup). Deleting a row or setting `exempt = true` lifts the block at the next sync; `Exempt` lifts it at once.
-- `Exempt(ExemptRequest) → ExemptReply` — sets `exempt` on every row of `infohash`, but only while its ban is in the review window: it has rows, and every non-exempt one has a `purge_after` still ahead. The block lifts at once on the replica that serves the call, fingerprint included (other replicas follow at their next sync), and the purge never goes out. `rows` is the number of rows changed, 0 if the hash was already exempt. A `purge_now` ban, a row from before the purge delay (`purge_after` NULL) or a ban whose purge is due is refused with `FAILED_PRECONDITION`; an unknown hash is `NOT_FOUND`. The guard is there because the gRPC port has no authentication: anything in the cluster can call it, and that must never unban an immediate ban (the CSAM ban script sends `purge_now`) or one whose data is already gone. Those are exempted by hand in the database. For the same reason a later immediate ban overrides an exemption set here (`abuse.exempt_by_rpc`), so reporting and exempting a hash first cannot shield it from one; `UPDATE abuse SET exempt_by_rpc = false WHERE infohash = '<hash>'` makes it hold. `reason` goes to the server log; no mail is sent.
+- `Exempt(ExemptRequest) → ExemptReply` — admin port only. Sets `exempt` on exactly the rows of `infohash` it checked, and only while its ban is in the review window: it has rows, and every non-exempt one has a `purge_after` still ahead. The block lifts at once on the replica that serves the call, fingerprint included (other replicas follow at their next sync), and the purge never goes out. `rows` is the number of rows changed, 0 if the hash was already exempt. A `purge_now` ban, a row from before the purge delay (`purge_after` NULL) or a ban whose purge is due is refused with `FAILED_PRECONDITION`; an unknown hash is `NOT_FOUND`. Those bans are exempted by hand in the database. Every exemption that changed rows is mailed to support as `[exempt] <hash> — <reason>`; `reason` also goes to the server log.
+
+### Known gaps
+
+- **The public `Push` is unauthenticated**: anything that reaches the Service can ban any infohash. The block is immediate; the purge waits out the delay, so a reviewer can still exempt it in time.
+- **Reporter mail can be sent to any address**: `email` is only syntax-checked, so a caller can have the acknowledgement, quoting its own description, sent anywhere.
+- **Several replicas race**: the store lock is per process. `Exempt` lifts the block at once only on the replica that served it, two replicas pushing the same new hash can both insert a row, and an exempt row inserted by hand while an immediate ban is in flight is not seen by it (the hash ends exempt, its data purged).
+- **An immediate ban waits for row locks under the store lock**: an open transaction holding a row of the hash (a hand UPDATE in psql) holds up that ban, and Push and Sync on the replica, until it ends or the caller's deadline does.
 
 ## NATS events
 
@@ -67,6 +81,7 @@ make protoc                              # regenerate proto/*.pb.go
 --postgres-ssl                                                               [$PG_SSL]
 --grpc-host                        grpc listening host                       [$GRPC_HOST]
 --grpc-port            (50051)     grpc listening port                       [$GRPC_PORT]
+--admin-port           (50052)     admin grpc port on 127.0.0.1; 0 = off     [$ADMIN_GRPC_PORT]
 --nats-service-host                nats host (auto-injected in K8s)          [$NATS_SERVICE_HOST]
 --nats-service-port    (4222)      nats port                                 [$NATS_SERVICE_PORT]
 --sync-interval, --si  (10)        PG → Badger resync interval, minutes      [$STORE_SYNC_INTERVAL]
@@ -91,13 +106,16 @@ The `client/` directory contains a small `urfave/cli` tool for smoke-testing:
 ```bash
 go run ./client --host 127.0.0.1 --port 50051 push \
     --hash <infohash> --work "..." --email reporter@example.com --description "..."
-# also: --extra-hash <infohash> (repeatable), --purge-now, --source form|mail (default form),
+# also: --extra-hash <infohash> (repeatable), --purge-now (admin port only), --source form|mail (default form),
 #       --subject, --started-at (RFC 3339 or unix seconds), --notice-id, --fingerprint
 
 go run ./client --host 127.0.0.1 --port 50051 check --hash <infohash>
 
-go run ./client -H 127.0.0.1 -P 50051 exempt --hash <infohash> --reason "..."
-# prints the rows set exempt; exits 1 with the gRPC error (code = FailedPrecondition / NotFound) otherwise
+# admin port: Exempt, and Push with --purge-now honoured
+kubectl port-forward deploy/abuse-store 50052:50052 &
+go run ./client -H 127.0.0.1 -P 50052 exempt --hash <infohash> --reason "..."
+# prints the rows set exempt; exits 1 with the gRPC error (code = FailedPrecondition / NotFound) otherwise;
+# against the public port it exits 1 with code = Unimplemented
 ```
 
 ## Migrations

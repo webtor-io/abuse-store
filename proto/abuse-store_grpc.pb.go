@@ -35,7 +35,9 @@ type AbuseStoreClient interface {
 	// Exempts an infohash whose ban is still in its review window: every
 	// non-exempt row waits for a purge that has not come yet. Anything else
 	// (an immediate purge, a row from before the delay, a purge already due)
-	// is FAILED_PRECONDITION; an unknown infohash is NOT_FOUND.
+	// is FAILED_PRECONDITION; an unknown infohash is NOT_FOUND. Served on the
+	// admin port only (127.0.0.1, --admin-port); the public port answers
+	// UNIMPLEMENTED. Every exemption is mailed to support.
 	Exempt(ctx context.Context, in *ExemptRequest, opts ...grpc.CallOption) (*ExemptReply, error)
 }
 
@@ -88,7 +90,9 @@ type AbuseStoreServer interface {
 	// Exempts an infohash whose ban is still in its review window: every
 	// non-exempt row waits for a purge that has not come yet. Anything else
 	// (an immediate purge, a row from before the delay, a purge already due)
-	// is FAILED_PRECONDITION; an unknown infohash is NOT_FOUND.
+	// is FAILED_PRECONDITION; an unknown infohash is NOT_FOUND. Served on the
+	// admin port only (127.0.0.1, --admin-port); the public port answers
+	// UNIMPLEMENTED. Every exemption is mailed to support.
 	Exempt(context.Context, *ExemptRequest) (*ExemptReply, error)
 	mustEmbedUnimplementedAbuseStoreServer()
 }
