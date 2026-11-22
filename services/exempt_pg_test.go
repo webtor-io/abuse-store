@@ -489,25 +489,50 @@ func (e *pgEnv) refuse(t *testing.T, when string) {
 	t.Cleanup(func() { e.exec(t, `DROP FUNCTION refuse() CASCADE`) })
 }
 
-// Exempt changes only the rows it checked. One inserted while its read waited
-// on a lock, here a due row put in by hand, was never checked and is left
-// non-exempt.
-func TestPGExemptLeavesARowThatLandedWhileItWaited(t *testing.T) {
+// A due row that landed while Exempt's read waited on a lock, here an
+// immediate one put in by hand, was never checked, and the exemption would
+// shadow it: Exempt refuses and rolls back, the row it did check included.
+func TestPGExemptRefusesARowThatLandedWhileItWaited(t *testing.T) {
 	e := newPGEnv(t, "72h")
 	e.push(t, &pb.PushRequest{Infohash: hashA})
 	commit := e.holdRowLock(t, hashA)
-	exempted := make(chan *pb.ExemptReply, 1)
+	exempted := make(chan codes.Code, 1)
 	go func() {
-		r, _ := e.g.Exempt(context.Background(), &pb.ExemptRequest{Infohash: hashA})
-		exempted <- r
+		_, err := e.g.Exempt(context.Background(), &pb.ExemptRequest{Infohash: hashA})
+		exempted <- status.Code(err)
 	}()
 	time.Sleep(200 * time.Millisecond)
 	e.exec(t, `INSERT INTO abuse (infohash, purge_after) VALUES (?, now())`, hashA)
 	commit()
-	if r := <-exempted; r.GetRows() != 1 {
-		t.Fatalf("exempt: rows %d, want 1", r.GetRows())
+	if c := <-exempted; c != codes.FailedPrecondition {
+		t.Fatalf("exempt: %v, want FailedPrecondition", c)
 	}
-	if n := e.count(t, `SELECT count(*) FROM abuse WHERE exempt AND purge_after <= now()`); n != 0 {
-		t.Fatalf("%d immediate rows exempted unchecked", n)
+	if n := e.count(t, `SELECT count(*) FROM abuse WHERE exempt`); n != 0 {
+		t.Fatalf("%d rows exempt, want the UPDATE rolled back", n)
+	}
+	if !blocked(t, e.s, hashA, nil) {
+		t.Fatal("unblocked by a refused Exempt")
+	}
+}
+
+// The UPDATE commits but the cache reload after it fails (Badger is closed
+// here): the call fails, and support gets the letter all the same, since the
+// hash is exempt in Postgres from now on.
+func TestPGExemptMailsWhenTheReloadFails(t *testing.T) {
+	e := newPGEnv(t, "72h")
+	e.push(t, &pb.PushRequest{Infohash: hashA})
+	e.sink.waitFor(t, 2)
+	e.sink.reset()
+	if err := e.s.b.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if _, c := e.exempt(t, hashA); c != codes.Internal {
+		t.Fatalf("exempt with the reload failing: %v, want Internal", c)
+	}
+	if n := e.count(t, `SELECT count(*) FROM abuse WHERE exempt`); n != 1 {
+		t.Fatalf("%d rows exempt, want 1", n)
+	}
+	if s := e.sink.waitFor(t, 1).subject(t, "support@example.com"); s != "[exempt] "+hashA+" — reviewed" {
+		t.Fatalf("support letter subject %q, want the exempt one", s)
 	}
 }

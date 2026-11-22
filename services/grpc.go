@@ -308,6 +308,15 @@ func (s *GRPC) Exempt(ctx context.Context, in *pb.ExemptRequest) (*pb.ExemptRepl
 	}
 	l := log.WithField("infohash", h).WithField("reason", in.GetReason())
 	n, err := s.store.Exempt(ctx, h)
+	// Rows changed means the UPDATE committed: support hears of it even when
+	// the cache reload after it failed and the call returns that error.
+	if n > 0 {
+		go func() {
+			if err := s.mailer.SendExemptEmail(h, oneLine(in.GetReason()), n); err != nil {
+				log.WithError(err).Error("failed to send exempt email")
+			}
+		}()
+	}
 	switch {
 	case errors.Is(err, ErrNotFound):
 		return nil, status.Errorf(codes.NotFound, "no abuse rows for infohash=%v", h)
@@ -319,13 +328,6 @@ func (s *GRPC) Exempt(ctx context.Context, in *pb.ExemptRequest) (*pb.ExemptRepl
 		return nil, status.Error(codes.Internal, err.Error())
 	}
 	l.WithField("rows", n).Info("infohash exempted")
-	if n > 0 {
-		go func() {
-			if err := s.mailer.SendExemptEmail(h, oneLine(in.GetReason()), n); err != nil {
-				log.WithError(err).Error("failed to send exempt email")
-			}
-		}()
-	}
 	return &pb.ExemptReply{Rows: int32(n)}, nil
 }
 

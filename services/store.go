@@ -279,7 +279,8 @@ func (s *Store) publish(h string) bool {
 // only while the ban is in its review window: h has rows, and every non-exempt
 // one has a purge_after still ahead. An immediate purge (purge_now: the
 // agents' bans), a row from before the delay (NULL) or a purge already due is
-// ErrPurgeDue, left to a hand UPDATE in Postgres; no rows is ErrNotFound.
+// ErrPurgeDue, left to a hand UPDATE in Postgres, and so is a due row that
+// landed after the read; no rows is ErrNotFound.
 // Returns the rows changed, 0 when h was already exempt. ctx bounds the
 // transaction, so a caller that gave up is not exempted later, when a row
 // lock it waited on is released.
@@ -324,6 +325,21 @@ func (s *Store) Exempt(ctx context.Context, h string) (int, error) {
 	r, err := tx.Exec(`UPDATE abuse SET exempt = true WHERE abuse_id IN (?) AND NOT exempt`, pg.In(ids))
 	if err != nil {
 		return 0, err
+	}
+	// The exemption shadows every row of h, the unchecked ones included: if
+	// one of them is due, refuse and roll the UPDATE back. Due by either
+	// clock: the database's for a row it timestamped (a hand INSERT), ours
+	// for one a replica did. Not now(): that is when this transaction began,
+	// before the row landed.
+	// ponytail: a row landing between this read and the commit is still
+	// shadowed; an advisory lock on h, taken by every writer, would close it.
+	var due int
+	if _, err := tx.QueryOne(pg.Scan(&due), `SELECT count(*) FROM abuse WHERE infohash = ? AND NOT exempt
+		AND (purge_after IS NULL OR purge_after <= GREATEST(clock_timestamp(), ?))`, h, time.Now()); err != nil {
+		return 0, err
+	}
+	if due > 0 {
+		return 0, ErrPurgeDue
 	}
 	if err := tx.Commit(); err != nil {
 		return 0, err
